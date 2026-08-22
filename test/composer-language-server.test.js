@@ -316,7 +316,7 @@ test("serves document links over the LSP stdio transport", async () => {
   const initialized = await request(1, "initialize");
   assert.equal(initialized.result.capabilities.documentLinkProvider.resolveProvider, false);
   assert.equal(initialized.result.capabilities.inlayHintProvider, true);
-  assert.equal(initialized.result.serverInfo.version, "0.3.0");
+  assert.equal(initialized.result.serverInfo.version, "0.1.0");
 
   const uri = pathToFileURL(path.join(os.tmpdir(), "composer.json")).href;
   send({

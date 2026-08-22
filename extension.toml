@@ -1,10 +1,10 @@
 id = "composer-support"
 name = "Composer Support"
 description = "Packagist links, installed versions, and update hints for composer.json files."
-version = "0.3.0"
+version = "0.1.0"
 schema_version = 1
-authors = ["bastenit"]
-repository = "https://github.com/bastenit/zed-composer-support"
+authors = ["BastenIT"]
+repository = "https://github.com/BastenIT/zed-composer-support"
 
 [language_servers.composer-language-server]
 name = "Composer Language Server"
@@ -14,4 +14,4 @@ language_ids = { "JSON" = "json" }
 [[capabilities]]
 kind = "download_file"
 host = "github.com"
-path = ["bastenit", "zed-composer-support", "releases", "download", "**"]
+path = ["BastenIT", "zed-composer-support", "releases", "download", "**"]

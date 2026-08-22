@@ -21,7 +21,7 @@ const MAX_CACHE_ENTRIES = 512;
 const MAX_HEADER_BYTES = 8 * 1024;
 const MAX_MESSAGE_BYTES = 16 * 1024 * 1024;
 const MAX_INSTALLED_METADATA_BYTES = 64 * 1024 * 1024;
-const SERVER_VERSION = "0.3.0";
+const SERVER_VERSION = "0.1.0";
 
 const documents = new Map();
 const latestVersionCache = new Map();
@@ -346,7 +346,7 @@ async function requestPackageMetadata(packageName, fetchImplementation) {
       {
         headers: {
           Accept: "application/json",
-          "User-Agent": `zed-composer-support/${SERVER_VERSION} (+https://github.com/bastenit/zed-composer-support)`,
+          "User-Agent": `zed-composer-support/${SERVER_VERSION} (+https://github.com/BastenIT/zed-composer-support)`,
         },
         signal: controller.signal,
       },

@@ -7,9 +7,9 @@ use zed_extension_api::{self as zed, Result};
 
 const LANGUAGE_SERVER_ID: &str = "composer-language-server";
 const SERVER_FILE_NAME: &str = "composer-language-server.js";
-const SERVER_VERSION: &str = "0.3.0";
+const SERVER_VERSION: &str = "0.1.0";
 const SERVER_DOWNLOAD_URL: &str =
-    "https://github.com/bastenit/zed-composer-support/releases/download/v0.3.0/composer-language-server.js";
+    "https://github.com/BastenIT/zed-composer-support/releases/download/v0.1.0/composer-language-server.js";
 
 struct ComposerExtension;
 
