@@ -1,4 +1,8 @@
-# Composer Support for Zed
+<p align="center">
+  <img src="assets/composer-support-logo.png" width="180" alt="Composer Support logo">
+</p>
+
+<h1 align="center">Composer Support for Zed</h1>
 
 Composer Support makes `composer.json` a little easier to work with in Zed. Package names link to Packagist, and installed versions appear beside their constraints without running Composer.
 
