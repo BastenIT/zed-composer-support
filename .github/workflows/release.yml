@@ -1,0 +1,30 @@
+name: Release
+
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Verify tag and project versions
+        shell: bash
+        run: node scripts/check-version.js "${GITHUB_REF_NAME#v}"
+      - name: Install the WebAssembly target
+        run: rustup target add wasm32-wasip2
+      - name: Run checks
+        run: npm run check
+      - name: Check formatting
+        run: cargo fmt --check
+      - name: Check the extension
+        run: cargo check --locked --target wasm32-wasip2
+      - name: Create GitHub release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release create "$GITHUB_REF_NAME" server/composer-language-server.js --generate-notes --verify-tag

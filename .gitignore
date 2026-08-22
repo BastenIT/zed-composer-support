@@ -1,0 +1,4 @@
+/target/
+/node_modules/
+/extension.wasm
+.DS_Store

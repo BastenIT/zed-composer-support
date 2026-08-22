@@ -1,0 +1,17 @@
+id = "composer-support"
+name = "Composer Support"
+description = "Packagist links, installed versions, and update hints for composer.json files."
+version = "0.3.0"
+schema_version = 1
+authors = ["bastenit"]
+repository = "https://github.com/bastenit/zed-composer-support"
+
+[language_servers.composer-language-server]
+name = "Composer Language Server"
+language = "JSON"
+language_ids = { "JSON" = "json" }
+
+[[capabilities]]
+kind = "download_file"
+host = "github.com"
+path = ["bastenit", "zed-composer-support", "releases", "download", "**"]
