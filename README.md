@@ -84,7 +84,9 @@ cargo clippy -p composer-language-server --all-targets -- -D warnings
 cargo check -p zed_composer_support --target wasm32-wasip2
 ```
 
-Published builds download the matching native language server from the extension's GitHub release. Releases include binaries for Intel and ARM systems on macOS, Linux, and Windows. Before publishing version `X.Y.Z`, set the matching project versions and push the `vX.Y.Z` tag. The release workflow tests the server and extension, builds all six executables on native GitHub runners, and publishes the release only after every build succeeds.
+Published builds download the matching native language server from the extension's GitHub release. Releases include binaries for Intel and ARM systems on macOS, Linux, and Windows. Linux releases are statically linked with musl, so they do not depend on the host distribution's glibc version. The macOS builds declare deployment targets matching Zed's supported Intel and Apple Silicon systems, while the Windows builds use Rust's native MSVC targets.
+
+Before publishing version `X.Y.Z`, set the matching project versions and push the `vX.Y.Z` tag. The release workflow tests the server and extension, builds all six executables on native GitHub runners, verifies that Linux binaries have no shared-library dependency, and publishes the release only after every build succeeds. Runner labels such as `ubuntu-22.04` and `windows-2025` identify GitHub's temporary build machines; they are not runtime requirements for extension users.
 
 When an upgrade cannot download its matching server, the launcher temporarily falls back to a valid server left by an earlier extension version. It retries the versioned download on the next language-server start. A fresh installation still requires the matching GitHub release asset.
 

@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.2.1
+
+- Ship self-contained musl binaries on Linux so the language server does not depend on a distribution's glibc version.
+- Set explicit macOS deployment targets for Intel and Apple Silicon releases.
+- Keep Linux 0.2.0 GNU binaries eligible as offline fallbacks during the transition.
+
 ## 0.2.0
 
 - Replace the Node.js language server with a native Rust implementation.

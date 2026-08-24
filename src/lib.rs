@@ -7,7 +7,7 @@ use std::{
 use zed_extension_api::{self as zed, Result};
 
 const LANGUAGE_SERVER_ID: &str = "composer-language-server";
-const SERVER_VERSION: &str = "0.2.0";
+const SERVER_VERSION: &str = "0.2.1";
 const SERVER_NAME: &str = "composer-language-server";
 const MIN_SERVER_BYTES: u64 = 64 * 1024;
 
@@ -22,6 +22,7 @@ enum ExecutableFormat {
 
 struct ServerPlatform {
     target: &'static str,
+    fallback_targets: &'static [&'static str],
     executable_suffix: &'static str,
     format: ExecutableFormat,
 }
@@ -39,31 +40,37 @@ impl ComposerExtension {
         let platform = match (os, architecture) {
             (Os::Mac, Architecture::Aarch64) => ServerPlatform {
                 target: "aarch64-apple-darwin",
+                fallback_targets: &["aarch64-apple-darwin"],
                 executable_suffix: "",
                 format: ExecutableFormat::MachO,
             },
             (Os::Mac, Architecture::X8664) => ServerPlatform {
                 target: "x86_64-apple-darwin",
+                fallback_targets: &["x86_64-apple-darwin"],
                 executable_suffix: "",
                 format: ExecutableFormat::MachO,
             },
             (Os::Linux, Architecture::Aarch64) => ServerPlatform {
-                target: "aarch64-unknown-linux-gnu",
+                target: "aarch64-unknown-linux-musl",
+                fallback_targets: &["aarch64-unknown-linux-musl", "aarch64-unknown-linux-gnu"],
                 executable_suffix: "",
                 format: ExecutableFormat::Elf,
             },
             (Os::Linux, Architecture::X8664) => ServerPlatform {
-                target: "x86_64-unknown-linux-gnu",
+                target: "x86_64-unknown-linux-musl",
+                fallback_targets: &["x86_64-unknown-linux-musl", "x86_64-unknown-linux-gnu"],
                 executable_suffix: "",
                 format: ExecutableFormat::Elf,
             },
             (Os::Windows, Architecture::Aarch64) => ServerPlatform {
                 target: "aarch64-pc-windows-msvc",
+                fallback_targets: &["aarch64-pc-windows-msvc"],
                 executable_suffix: ".exe",
                 format: ExecutableFormat::Windows,
             },
             (Os::Windows, Architecture::X8664) => ServerPlatform {
                 target: "x86_64-pc-windows-msvc",
+                fallback_targets: &["x86_64-pc-windows-msvc"],
                 executable_suffix: ".exe",
                 format: ExecutableFormat::Windows,
             },
@@ -131,7 +138,11 @@ impl ComposerExtension {
         current_path: &Path,
         platform: &ServerPlatform,
     ) -> Option<PathBuf> {
-        let suffix = format!("-{}{}", platform.target, platform.executable_suffix);
+        let suffixes: Vec<_> = platform
+            .fallback_targets
+            .iter()
+            .map(|target| format!("-{target}{}", platform.executable_suffix))
+            .collect();
         let mut candidates: Vec<_> = fs::read_dir(work_dir)
             .ok()?
             .filter_map(|entry| entry.ok().map(|entry| entry.path()))
@@ -139,7 +150,10 @@ impl ComposerExtension {
             .filter(|path| {
                 path.file_name()
                     .and_then(|name| name.to_str())
-                    .is_some_and(|name| name.starts_with(SERVER_NAME) && name.ends_with(&suffix))
+                    .is_some_and(|name| {
+                        name.starts_with(SERVER_NAME)
+                            && suffixes.iter().any(|suffix| name.ends_with(suffix))
+                    })
             })
             .filter(|path| Self::is_valid_server(path, platform.format))
             .collect();

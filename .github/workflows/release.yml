@@ -51,23 +51,27 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
+        # The runner is only the build machine. The Rust target and asset name
+        # define the systems on which the resulting executable runs.
         include:
           - runner: ubuntu-22.04
-            target: x86_64-unknown-linux-gnu
-            asset: composer-language-server-x86_64-unknown-linux-gnu
+            target: x86_64-unknown-linux-musl
+            asset: composer-language-server-x86_64-unknown-linux-musl
             executable: composer-language-server
           - runner: ubuntu-22.04-arm
-            target: aarch64-unknown-linux-gnu
-            asset: composer-language-server-aarch64-unknown-linux-gnu
+            target: aarch64-unknown-linux-musl
+            asset: composer-language-server-aarch64-unknown-linux-musl
             executable: composer-language-server
           - runner: macos-15-intel
             target: x86_64-apple-darwin
             asset: composer-language-server-x86_64-apple-darwin
             executable: composer-language-server
+            macos_deployment_target: "10.15"
           - runner: macos-15
             target: aarch64-apple-darwin
             asset: composer-language-server-aarch64-apple-darwin
             executable: composer-language-server
+            macos_deployment_target: "11.0"
           - runner: windows-2025
             target: x86_64-pc-windows-msvc
             asset: composer-language-server-x86_64-pc-windows-msvc.exe
@@ -82,8 +86,36 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - name: Install the Rust target
         run: rustup target add ${{ matrix.target }}
-      - name: Build the native language server
+      - name: Install the musl toolchain
+        if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install --yes musl-tools
+      - name: Build the self-contained Linux language server
+        if: runner.os == 'Linux'
+        env:
+          CC: musl-gcc
+          RUSTFLAGS: -C target-feature=+crt-static
         run: cargo build --locked --release -p composer-language-server --target ${{ matrix.target }}
+      - name: Build the macOS language server
+        if: runner.os == 'macOS'
+        env:
+          MACOSX_DEPLOYMENT_TARGET: ${{ matrix.macos_deployment_target }}
+        run: cargo build --locked --release -p composer-language-server --target ${{ matrix.target }}
+      - name: Build the Windows language server
+        if: runner.os == 'Windows'
+        run: cargo build --locked --release -p composer-language-server --target ${{ matrix.target }}
+      - name: Verify the Linux binary is self-contained
+        if: runner.os == 'Linux'
+        shell: bash
+        run: |
+          binary="target/${{ matrix.target }}/release/${{ matrix.executable }}"
+          if readelf -l "$binary" | grep -q 'Requesting program interpreter'; then
+            echo "$binary unexpectedly requires a dynamic loader" >&2
+            exit 1
+          fi
+          if readelf -d "$binary" 2>/dev/null | grep -q '(NEEDED)'; then
+            echo "$binary unexpectedly depends on shared libraries" >&2
+            exit 1
+          fi
       - name: Upload the release asset
         shell: bash
         env:
