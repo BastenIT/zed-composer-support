@@ -20,12 +20,11 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - name: Install the WebAssembly target
         run: rustup target add wasm32-wasip2
-      - name: Check JavaScript
-        run: npm run check
       - name: Check formatting
-        run: cargo fmt --check
+        run: cargo fmt --all --check
+      - name: Test the language server
+        run: cargo test --locked -p composer-language-server
+      - name: Lint the language server
+        run: cargo clippy --locked -p composer-language-server --all-targets -- -D warnings
       - name: Check the extension
-        run: cargo check --locked --target wasm32-wasip2
-      - name: Check version fields
-        shell: bash
-        run: node scripts/check-version.js "$(node -p 'require("./package.json").version')"
+        run: cargo check --locked -p zed_composer_support --target wasm32-wasip2

@@ -8,23 +8,97 @@ permissions:
   contents: write
 
 jobs:
-  release:
+  verify:
     runs-on: ubuntu-latest
 
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-      - name: Verify tag and project versions
+      - name: Verify the tag
         shell: bash
-        run: node scripts/check-version.js "${GITHUB_REF_NAME#v}"
+        run: |
+          server_version="$(sed -n 's/^version = "\([^"]*\)"/\1/p' server/Cargo.toml | head -1)"
+          if [[ "$GITHUB_REF_NAME" != "v$server_version" ]]; then
+            echo "tag $GITHUB_REF_NAME does not match server version $server_version" >&2
+            exit 1
+          fi
       - name: Install the WebAssembly target
         run: rustup target add wasm32-wasip2
-      - name: Run checks
-        run: npm run check
       - name: Check formatting
-        run: cargo fmt --check
+        run: cargo fmt --all --check
+      - name: Test the language server
+        run: cargo test --locked -p composer-language-server
+      - name: Lint the language server
+        run: cargo clippy --locked -p composer-language-server --all-targets -- -D warnings
       - name: Check the extension
-        run: cargo check --locked --target wasm32-wasip2
-      - name: Create GitHub release
+        run: cargo check --locked -p zed_composer_support --target wasm32-wasip2
+
+  create-release:
+    needs: verify
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Create a draft release
         env:
           GH_TOKEN: ${{ github.token }}
-        run: gh release create "$GITHUB_REF_NAME" server/composer-language-server.js --generate-notes --verify-tag
+        run: |
+          if ! gh release view "$GITHUB_REF_NAME" >/dev/null 2>&1; then
+            gh release create "$GITHUB_REF_NAME" --draft --generate-notes --verify-tag
+          fi
+
+  build-server:
+    needs: create-release
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: ubuntu-22.04
+            target: x86_64-unknown-linux-gnu
+            asset: composer-language-server-x86_64-unknown-linux-gnu
+            executable: composer-language-server
+          - runner: ubuntu-22.04-arm
+            target: aarch64-unknown-linux-gnu
+            asset: composer-language-server-aarch64-unknown-linux-gnu
+            executable: composer-language-server
+          - runner: macos-15-intel
+            target: x86_64-apple-darwin
+            asset: composer-language-server-x86_64-apple-darwin
+            executable: composer-language-server
+          - runner: macos-15
+            target: aarch64-apple-darwin
+            asset: composer-language-server-aarch64-apple-darwin
+            executable: composer-language-server
+          - runner: windows-2025
+            target: x86_64-pc-windows-msvc
+            asset: composer-language-server-x86_64-pc-windows-msvc.exe
+            executable: composer-language-server.exe
+          - runner: windows-11-arm
+            target: aarch64-pc-windows-msvc
+            asset: composer-language-server-aarch64-pc-windows-msvc.exe
+            executable: composer-language-server.exe
+    runs-on: ${{ matrix.runner }}
+
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Install the Rust target
+        run: rustup target add ${{ matrix.target }}
+      - name: Build the native language server
+        run: cargo build --locked --release -p composer-language-server --target ${{ matrix.target }}
+      - name: Upload the release asset
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          cp "target/${{ matrix.target }}/release/${{ matrix.executable }}" "${{ matrix.asset }}"
+          gh release upload "$GITHUB_REF_NAME" "${{ matrix.asset }}" --clobber
+
+  publish-release:
+    needs: build-server
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Publish the completed release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: gh release edit "$GITHUB_REF_NAME" --draft=false

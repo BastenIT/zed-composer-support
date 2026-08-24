@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.2.0
+
+- Replace the Node.js language server with a native Rust implementation.
+- Build dedicated Intel and ARM binaries for macOS, Linux, and Windows.
+- Validate downloaded executables before starting them and retain an older native server as an offline fallback.
+- Preserve package links, installed-version hints, optional Packagist update checks, bounded caching, and background refreshes.
+- Use a maintained range-aware JSON scanner while keeping partial-document recovery for active edits.
+
 ## 0.1.0
 
 First public release.

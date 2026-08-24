@@ -1,17 +1,30 @@
 use std::{
     env, fs,
+    io::Read,
     path::{Path, PathBuf},
 };
 
 use zed_extension_api::{self as zed, Result};
 
 const LANGUAGE_SERVER_ID: &str = "composer-language-server";
-const SERVER_FILE_NAME: &str = "composer-language-server.js";
-const SERVER_VERSION: &str = "0.1.0";
-const SERVER_DOWNLOAD_URL: &str =
-    "https://github.com/BastenIT/zed-composer-support/releases/download/v0.1.0/composer-language-server.js";
+const SERVER_VERSION: &str = "0.2.0";
+const SERVER_NAME: &str = "composer-language-server";
+const MIN_SERVER_BYTES: u64 = 64 * 1024;
 
 struct ComposerExtension;
+
+#[derive(Clone, Copy)]
+enum ExecutableFormat {
+    Elf,
+    MachO,
+    Windows,
+}
+
+struct ServerPlatform {
+    target: &'static str,
+    executable_suffix: &'static str,
+    format: ExecutableFormat,
+}
 
 impl ComposerExtension {
     fn work_dir() -> Result<PathBuf> {
@@ -19,34 +32,140 @@ impl ComposerExtension {
             .map_err(|error| format!("failed to locate the extension work directory: {error}"))
     }
 
-    fn is_valid_server(path: &Path) -> bool {
-        fs::read_to_string(path)
-            .map(|contents| {
-                contents.len() > 1_024
-                    && contents.starts_with("\"use strict\";")
-                    && contents.contains("composer-language-server")
-            })
-            .unwrap_or(false)
+    fn platform() -> Result<ServerPlatform> {
+        use zed::{Architecture, Os};
+
+        let (os, architecture) = zed::current_platform();
+        let platform = match (os, architecture) {
+            (Os::Mac, Architecture::Aarch64) => ServerPlatform {
+                target: "aarch64-apple-darwin",
+                executable_suffix: "",
+                format: ExecutableFormat::MachO,
+            },
+            (Os::Mac, Architecture::X8664) => ServerPlatform {
+                target: "x86_64-apple-darwin",
+                executable_suffix: "",
+                format: ExecutableFormat::MachO,
+            },
+            (Os::Linux, Architecture::Aarch64) => ServerPlatform {
+                target: "aarch64-unknown-linux-gnu",
+                executable_suffix: "",
+                format: ExecutableFormat::Elf,
+            },
+            (Os::Linux, Architecture::X8664) => ServerPlatform {
+                target: "x86_64-unknown-linux-gnu",
+                executable_suffix: "",
+                format: ExecutableFormat::Elf,
+            },
+            (Os::Windows, Architecture::Aarch64) => ServerPlatform {
+                target: "aarch64-pc-windows-msvc",
+                executable_suffix: ".exe",
+                format: ExecutableFormat::Windows,
+            },
+            (Os::Windows, Architecture::X8664) => ServerPlatform {
+                target: "x86_64-pc-windows-msvc",
+                executable_suffix: ".exe",
+                format: ExecutableFormat::Windows,
+            },
+            (_, Architecture::X86) => {
+                return Err(
+                    "Composer Support does not provide a language server for 32-bit systems"
+                        .to_owned(),
+                );
+            }
+        };
+        Ok(platform)
     }
 
-    fn server_path() -> Result<PathBuf> {
-        let work_dir = Self::work_dir()?;
-
-        // Prefer the source file when a development host uses the checkout as
-        // its work directory. Published builds do not contain this path.
-        let development_path = work_dir.join("server").join(SERVER_FILE_NAME);
-        if Self::is_valid_server(&development_path) {
-            return Ok(development_path);
+    fn is_valid_server(path: &Path, format: ExecutableFormat) -> bool {
+        let Ok(metadata) = fs::metadata(path) else {
+            return false;
+        };
+        if !metadata.is_file() || metadata.len() < MIN_SERVER_BYTES {
+            return false;
         }
 
-        let path = work_dir.join(format!("composer-language-server-{SERVER_VERSION}.js"));
-        if Self::is_valid_server(&path) {
+        let mut signature = [0_u8; 4];
+        let read = fs::File::open(path)
+            .and_then(|mut file| file.read(&mut signature))
+            .unwrap_or(0);
+        match format {
+            ExecutableFormat::Elf => read == 4 && signature == *b"\x7fELF",
+            ExecutableFormat::Windows => read >= 2 && signature[..2] == *b"MZ",
+            ExecutableFormat::MachO => {
+                read == 4
+                    && matches!(
+                        signature,
+                        [0xfe, 0xed, 0xfa, 0xce]
+                            | [0xce, 0xfa, 0xed, 0xfe]
+                            | [0xfe, 0xed, 0xfa, 0xcf]
+                            | [0xcf, 0xfa, 0xed, 0xfe]
+                            | [0xca, 0xfe, 0xba, 0xbe]
+                    )
+            }
+        }
+    }
+
+    fn development_server(work_dir: &Path, platform: &ServerPlatform) -> Option<PathBuf> {
+        let file_name = format!("{SERVER_NAME}{}", platform.executable_suffix);
+        [
+            work_dir.join("target").join("debug").join(&file_name),
+            work_dir.join("target").join("release").join(&file_name),
+            work_dir
+                .join("target")
+                .join(platform.target)
+                .join("debug")
+                .join(&file_name),
+            work_dir
+                .join("target")
+                .join(platform.target)
+                .join("release")
+                .join(file_name),
+        ]
+        .into_iter()
+        .find(|path| Self::is_valid_server(path, platform.format))
+    }
+
+    fn fallback_server(
+        work_dir: &Path,
+        current_path: &Path,
+        platform: &ServerPlatform,
+    ) -> Option<PathBuf> {
+        let suffix = format!("-{}{}", platform.target, platform.executable_suffix);
+        let mut candidates: Vec<_> = fs::read_dir(work_dir)
+            .ok()?
+            .filter_map(|entry| entry.ok().map(|entry| entry.path()))
+            .filter(|path| path != current_path)
+            .filter(|path| {
+                path.file_name()
+                    .and_then(|name| name.to_str())
+                    .is_some_and(|name| name.starts_with(SERVER_NAME) && name.ends_with(&suffix))
+            })
+            .filter(|path| Self::is_valid_server(path, platform.format))
+            .collect();
+        candidates.sort_unstable_by(|left, right| right.file_name().cmp(&left.file_name()));
+        candidates.into_iter().next()
+    }
+
+    fn server_path(language_server_id: &zed::LanguageServerId) -> Result<PathBuf> {
+        let work_dir = Self::work_dir()?;
+        let platform = Self::platform()?;
+
+        if let Some(path) = Self::development_server(&work_dir, &platform) {
             return Ok(path);
         }
 
-        // Older versions wrote the server under an unversioned filename. Keep
-        // it as an offline fallback, but still try the matching release first.
-        let legacy_path = work_dir.join(SERVER_FILE_NAME);
+        let asset_name = format!(
+            "{SERVER_NAME}-{}{}",
+            platform.target, platform.executable_suffix
+        );
+        let path = work_dir.join(format!(
+            "{SERVER_NAME}-{SERVER_VERSION}-{}{}",
+            platform.target, platform.executable_suffix
+        ));
+        if Self::is_valid_server(&path, platform.format) {
+            return Ok(path);
+        }
 
         if path.exists() {
             fs::remove_file(&path).map_err(|error| {
@@ -57,32 +176,63 @@ impl ComposerExtension {
             })?;
         }
 
-        let download_result = zed::download_file(
-            SERVER_DOWNLOAD_URL,
+        let download_url = format!(
+            "https://github.com/BastenIT/zed-composer-support/releases/download/v{SERVER_VERSION}/{asset_name}"
+        );
+        zed::set_language_server_installation_status(
+            language_server_id,
+            &zed::LanguageServerInstallationStatus::Downloading,
+        );
+        let result = zed::download_file(
+            &download_url,
             path.to_string_lossy().as_ref(),
             zed::DownloadedFileType::Uncompressed,
+        )
+        .and_then(|_| zed::make_file_executable(path.to_string_lossy().as_ref()));
+
+        if let Err(error) = result {
+            if let Some(fallback) = Self::fallback_server(&work_dir, &path, &platform) {
+                zed::set_language_server_installation_status(
+                    language_server_id,
+                    &zed::LanguageServerInstallationStatus::None,
+                );
+                return Ok(fallback);
+            }
+            let message = format!(
+                "failed to install Composer language server {SERVER_VERSION} for {}: {error}. No previously installed native server is available; check the v{SERVER_VERSION} GitHub release and Zed's download permissions",
+                platform.target
+            );
+            zed::set_language_server_installation_status(
+                language_server_id,
+                &zed::LanguageServerInstallationStatus::Failed(message.clone()),
+            );
+            return Err(message);
+        }
+
+        if !Self::is_valid_server(&path, platform.format) {
+            if let Some(fallback) = Self::fallback_server(&work_dir, &path, &platform) {
+                zed::set_language_server_installation_status(
+                    language_server_id,
+                    &zed::LanguageServerInstallationStatus::None,
+                );
+                return Ok(fallback);
+            }
+            let _ = fs::remove_file(&path);
+            let message = format!(
+                "downloaded Composer language server {SERVER_VERSION} for {} is not a valid executable",
+                platform.target
+            );
+            zed::set_language_server_installation_status(
+                language_server_id,
+                &zed::LanguageServerInstallationStatus::Failed(message.clone()),
+            );
+            return Err(message);
+        }
+
+        zed::set_language_server_installation_status(
+            language_server_id,
+            &zed::LanguageServerInstallationStatus::None,
         );
-
-        if let Err(error) = download_result {
-            if Self::is_valid_server(&legacy_path) {
-                return Ok(legacy_path);
-            }
-
-            return Err(format!(
-                "failed to download Composer language server {SERVER_VERSION}: {error}. No previously installed server is available; check your network connection and extension download permissions"
-            ));
-        }
-
-        if !Self::is_valid_server(&path) {
-            if Self::is_valid_server(&legacy_path) {
-                return Ok(legacy_path);
-            }
-
-            return Err(format!(
-                "downloaded Composer language server {SERVER_VERSION} is empty or incomplete, and no previously installed server is available"
-            ));
-        }
-
         Ok(path)
     }
 }
@@ -112,11 +262,11 @@ impl zed::Extension for ComposerExtension {
             }
         }
 
-        let server_path = Self::server_path()?;
-
         Ok(zed::Command {
-            command: zed::node_binary_path()?,
-            args: vec![server_path.to_string_lossy().into_owned()],
+            command: Self::server_path(language_server_id)?
+                .to_string_lossy()
+                .into_owned(),
+            args: Vec::new(),
             env: Default::default(),
         })
     }

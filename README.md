@@ -4,7 +4,7 @@
 
 <h1 align="center">Composer Support for Zed</h1>
 
-Composer Support makes `composer.json` a little easier to work with in Zed. Package names link to Packagist, and installed versions appear beside their constraints without running Composer.
+Composer Support is an ultra-high-performance language server for `composer.json`, written entirely in Rust. Package names link to Packagist, and installed versions appear beside their constraints without running Composer or a JavaScript runtime.
 
 ## What it does
 
@@ -16,11 +16,15 @@ Composer Support makes `composer.json` a little easier to work with in Zed. Pack
 
 Links are added in `require`, `require-dev`, `conflict`, `replace`, `provide`, and `suggest`. Platform requirements such as `php`, `ext-*`, and `lib-*` are left alone because they are not Packagist packages.
 
+## Performance by design
+
+The language server is distributed as an optimized native binary with link-time optimization enabled. Its event loop stays lightweight, filesystem and network work runs off the main protocol path, Packagist requests are deduplicated and limited to ten at a time, and the update cache is bounded. Locally installed versions are always returned first; update checks never delay or hide them.
+
 ## Installation
 
 Once the extension is published, install **Composer Support** from Zed's Extensions page.
 
-For local development, open the command palette, run **zed: extensions**, choose **Install Dev Extension**, and select this repository. Rebuild the dev extension after changing the Rust launcher. Changes to the JavaScript server take effect after the language server restarts.
+For local development, build the native server first with `cargo build -p composer-language-server`. Then open the command palette, run **zed: extensions**, choose **Install Dev Extension**, and select this repository. Restart the Composer language server after rebuilding it.
 
 Document links are enabled in Zed by default. Use Command-click on macOS or Control-click on Linux and Windows.
 
@@ -65,36 +69,33 @@ The comparison uses the newest stable tag published on Packagist. It does not re
 
 ## Development
 
-The extension consists of a small Rust launcher and a dependency-free Node.js language server. Zed provides the Node runtime in normal use.
+The extension is entirely Rust. A small WebAssembly launcher integrates with Zed and downloads a native `composer-language-server` executable for the current platform. The server uses a range-aware JSON scanner so links and hints stay aligned with the source text, including UTF-16 LSP positions.
 
 Requirements:
 
-- Node.js 18 or newer
 - Rust stable with the `wasm32-wasip2` target
 
 Run the checks locally:
 
 ```sh
-npm run check
-cargo fmt --check
-cargo check --target wasm32-wasip2
+cargo fmt --all --check
+cargo test -p composer-language-server
+cargo clippy -p composer-language-server --all-targets -- -D warnings
+cargo check -p zed_composer_support --target wasm32-wasip2
 ```
 
-Published builds download the matching language-server file from the extension's GitHub release. This follows Zed's extension packaging rules and keeps the WebAssembly launcher small. Before publishing version `X.Y.Z`, create the `vX.Y.Z` tag; the release workflow verifies every version field and uploads `composer-language-server.js`.
+Published builds download the matching native language server from the extension's GitHub release. Releases include binaries for Intel and ARM systems on macOS, Linux, and Windows. Before publishing version `X.Y.Z`, set the matching project versions and push the `vX.Y.Z` tag. The release workflow tests the server and extension, builds all six executables on native GitHub runners, and publishes the release only after every build succeeds.
 
 When an upgrade cannot download its matching server, the launcher temporarily falls back to a valid server left by an earlier extension version. It retries the versioned download on the next language-server start. A fresh installation still requires the matching GitHub release asset.
 
-If a local dev build cannot use the server from the checkout, point Zed at Node and the script explicitly:
+If a local dev build cannot find the server from `target/debug`, point Zed at the executable explicitly:
 
 ```json
 {
   "lsp": {
     "composer-language-server": {
       "binary": {
-        "path": "/absolute/path/to/node",
-        "arguments": [
-          "/absolute/path/to/zed-composer-support/server/composer-language-server.js"
-        ]
+        "path": "/absolute/path/to/zed-composer-support/target/debug/composer-language-server"
       }
     }
   }
@@ -102,6 +103,14 @@ If a local dev build cannot use the server from the checkout, point Zed at Node 
 ```
 
 See [CONTRIBUTING.md](CONTRIBUTING.md) for the release checklist.
+
+## BastenIT
+
+<p>
+  <img src="assets/bastenit-logo.png" width="96" alt="BastenIT logo">
+</p>
+
+Built and maintained by BastenIT.
 
 ## License
 

@@ -1,0 +1,26 @@
+[package]
+name = "composer-language-server"
+version = "0.2.0"
+edition = "2021"
+publish = false
+license = "MIT"
+
+[dependencies]
+jsonc-parser = "0.33.1"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tokio = { version = "1", features = ["io-std", "macros", "rt-multi-thread", "sync", "time"] }
+tower-lsp-server = "0.23.0"
+ureq = { version = "3.4.0", features = ["json"] }
+url = "2"
+
+[dev-dependencies]
+tempfile = "3"
+
+[lints.rust]
+unsafe_code = "forbid"
+
+[lints.clippy]
+dbg_macro = "warn"
+todo = "warn"
+unwrap_used = "warn"
