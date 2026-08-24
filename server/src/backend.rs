@@ -366,6 +366,7 @@ impl LanguageServer for Backend {
         .await
         .unwrap_or_default();
         let mut hints = Vec::new();
+        let mut hint_positions = HashSet::new();
         let mut update_requests = Vec::new();
 
         for dependency in &document.dependencies {
@@ -374,6 +375,13 @@ impl LanguageServer for Backend {
             };
             let position = dependency_position(dependency);
             if !position_in_range(position, params.range) {
+                continue;
+            }
+            if !hint_positions.insert((
+                position.line,
+                position.character,
+                dependency.name.to_ascii_lowercase(),
+            )) {
                 continue;
             }
 

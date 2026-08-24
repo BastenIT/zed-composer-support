@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.2.4
+
+- Keep installed-version hints stable while Composer rewrites `installed.json` during an update.
+- Prevent duplicate inlay hints from being returned for the same dependency position.
+
 ## 0.2.3
 
 - Persist Packagist results and the hourly request budget across language-server and editor restarts.

@@ -2,7 +2,7 @@ local root = vim.fn.getcwd()
 vim.opt.runtimepath:prepend(root)
 
 local composer = require("composer_support")
-assert(composer._server_version == "0.2.3")
+assert(composer._server_version == "0.2.4")
 
 local platforms = {
   { "Darwin", "x86_64", "composer-language-server-x86_64-apple-darwin" },

@@ -4,7 +4,7 @@ use std::{
     io::Read,
     path::{Path, PathBuf},
     sync::Arc,
-    time::SystemTime,
+    time::{Duration, Instant, SystemTime},
 };
 
 use jsonc_parser::{tokens::Token as JsonToken, Scanner, ScannerOptions};
@@ -14,6 +14,7 @@ use url::Url;
 
 const MAX_INSTALLED_METADATA_BYTES: u64 = 16 * 1024 * 1024;
 const MAX_INSTALLED_CACHE_ENTRIES: usize = 64;
+const INSTALLED_METADATA_GRACE_PERIOD: Duration = Duration::from_secs(5);
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 enum TokenKind {
@@ -76,6 +77,7 @@ struct InstalledCacheEntry {
     fingerprint: MetadataFingerprint,
     versions: Arc<HashMap<String, String>>,
     last_used: u64,
+    unavailable_since: Option<Instant>,
 }
 
 #[derive(Debug, Default)]
@@ -90,29 +92,39 @@ impl InstalledVersionCache {
         uri: &str,
         document_text: &str,
     ) -> Arc<HashMap<String, String>> {
+        self.versions_at(uri, document_text, Instant::now())
+    }
+
+    fn versions_at(
+        &mut self,
+        uri: &str,
+        document_text: &str,
+        now: Instant,
+    ) -> Arc<HashMap<String, String>> {
         let Some(installed_path) = installed_metadata_path(uri, document_text) else {
             return Arc::default();
         };
-        let Ok(metadata) = fs::metadata(&installed_path) else {
-            self.entries.remove(&installed_path);
-            return Arc::default();
+        self.clock = self.clock.wrapping_add(1);
+
+        let metadata = match fs::metadata(&installed_path) {
+            Ok(metadata) => metadata,
+            Err(_) => return self.cached_during_rewrite(&installed_path, now),
         };
         let Some(fingerprint) = metadata_fingerprint(&metadata) else {
             self.entries.remove(&installed_path);
             return Arc::default();
         };
 
-        self.clock = self.clock.wrapping_add(1);
         if let Some(entry) = self.entries.get_mut(&installed_path) {
             if entry.fingerprint == fingerprint {
                 entry.last_used = self.clock;
+                entry.unavailable_since = None;
                 return Arc::clone(&entry.versions);
             }
         }
 
-        let Some(versions) = read_installed_versions(&installed_path) else {
-            self.entries.remove(&installed_path);
-            return Arc::default();
+        let Some((fingerprint, versions)) = read_installed_versions(&installed_path) else {
+            return self.cached_during_rewrite(&installed_path, now);
         };
         let versions = Arc::new(versions);
         if self.entries.len() >= MAX_INSTALLED_CACHE_ENTRIES
@@ -133,9 +145,23 @@ impl InstalledVersionCache {
                 fingerprint,
                 versions: Arc::clone(&versions),
                 last_used: self.clock,
+                unavailable_since: None,
             },
         );
         versions
+    }
+
+    fn cached_during_rewrite(&mut self, path: &Path, now: Instant) -> Arc<HashMap<String, String>> {
+        if let Some(entry) = self.entries.get_mut(path) {
+            let unavailable_since = *entry.unavailable_since.get_or_insert(now);
+            if now.saturating_duration_since(unavailable_since) <= INSTALLED_METADATA_GRACE_PERIOD {
+                entry.last_used = self.clock;
+                return Arc::clone(&entry.versions);
+            }
+        }
+
+        self.entries.remove(path);
+        Arc::default()
     }
 }
 
@@ -415,7 +441,9 @@ pub(crate) fn installed_versions(uri: &str, document_text: &str) -> HashMap<Stri
     let Some(installed_path) = installed_metadata_path(uri, document_text) else {
         return HashMap::new();
     };
-    read_installed_versions(&installed_path).unwrap_or_default()
+    read_installed_versions(&installed_path)
+        .map(|(_, versions)| versions)
+        .unwrap_or_default()
 }
 
 fn installed_metadata_path(uri: &str, document_text: &str) -> Option<PathBuf> {
@@ -440,10 +468,10 @@ fn metadata_fingerprint(metadata: &Metadata) -> Option<MetadataFingerprint> {
     })
 }
 
-fn read_installed_versions(path: &Path) -> Option<HashMap<String, String>> {
+fn read_installed_versions(path: &Path) -> Option<(MetadataFingerprint, HashMap<String, String>)> {
     let file = File::open(path).ok()?;
     let metadata = file.metadata().ok()?;
-    metadata_fingerprint(&metadata)?;
+    let fingerprint = metadata_fingerprint(&metadata)?;
 
     // Read from the same handle that was inspected and enforce the limit while
     // reading. This prevents a symlink/device or a file replacement race from
@@ -456,7 +484,8 @@ fn read_installed_versions(path: &Path) -> Option<HashMap<String, String>> {
         return None;
     }
     let contents = String::from_utf8(contents).ok()?;
-    Some(installed_versions_from_json(&contents))
+    let versions = installed_versions_from_json(&contents)?;
+    Some((fingerprint, versions))
 }
 
 fn configured_vendor_directory(text: &str) -> Option<String> {
@@ -470,28 +499,26 @@ fn configured_vendor_directory(text: &str) -> Option<String> {
         .map(str::to_owned)
 }
 
-fn installed_versions_from_json(contents: &str) -> HashMap<String, String> {
-    let Ok(installed) = serde_json::from_str::<Value>(contents) else {
-        return HashMap::new();
-    };
+fn installed_versions_from_json(contents: &str) -> Option<HashMap<String, String>> {
+    let installed = serde_json::from_str::<Value>(contents).ok()?;
     let packages = installed
         .as_array()
         .or_else(|| installed.get("packages").and_then(Value::as_array));
-    let Some(packages) = packages else {
-        return HashMap::new();
-    };
+    let packages = packages?;
 
-    packages
-        .iter()
-        .filter_map(|package| {
-            let name = package.get("name")?.as_str()?;
-            let version = package
-                .get("pretty_version")
-                .and_then(Value::as_str)
-                .or_else(|| package.get("version").and_then(Value::as_str))?;
-            Some((name.to_ascii_lowercase(), version.to_owned()))
-        })
-        .collect()
+    Some(
+        packages
+            .iter()
+            .filter_map(|package| {
+                let name = package.get("name")?.as_str()?;
+                let version = package
+                    .get("pretty_version")
+                    .and_then(Value::as_str)
+                    .or_else(|| package.get("version").and_then(Value::as_str))?;
+                Some((name.to_ascii_lowercase(), version.to_owned()))
+            })
+            .collect(),
+    )
 }
 
 pub(crate) fn version_label(version: &str) -> String {
@@ -723,6 +750,85 @@ mod tests {
         fs::remove_file(&installed_path).expect("remove oversized metadata");
         fs::create_dir(&installed_path).expect("non-file metadata path");
         assert!(cache.versions(&uri, "{}").is_empty());
+        assert!(cache.entries.is_empty());
+    }
+
+    #[test]
+    fn keeps_last_valid_versions_during_an_installed_metadata_rewrite() {
+        let directory = tempdir().expect("temporary directory");
+        let composer_path = directory.path().join("composer.json");
+        let installed_directory = directory.path().join("vendor/composer");
+        fs::create_dir_all(&installed_directory).expect("installed directory");
+        let installed_path = installed_directory.join("installed.json");
+        fs::write(&installed_path, r#"[{"name":"psr/log","version":"3.0.1"}]"#)
+            .expect("installed metadata");
+        let uri = Url::from_file_path(composer_path)
+            .expect("file URL")
+            .to_string();
+        let mut cache = InstalledVersionCache::default();
+        let now = Instant::now();
+
+        assert_eq!(
+            cache.versions_at(&uri, "{}", now).get("psr/log"),
+            Some(&"3.0.1".to_owned())
+        );
+
+        fs::write(&installed_path, "{").expect("partially written metadata");
+        assert_eq!(
+            cache
+                .versions_at(&uri, "{}", now + Duration::from_secs(1))
+                .get("psr/log"),
+            Some(&"3.0.1".to_owned())
+        );
+
+        fs::remove_file(&installed_path).expect("temporarily missing metadata");
+        assert_eq!(
+            cache
+                .versions_at(&uri, "{}", now + Duration::from_secs(2))
+                .get("psr/log"),
+            Some(&"3.0.1".to_owned())
+        );
+
+        fs::write(
+            &installed_path,
+            r#"[{"name":"psr/log","version":"3.0.22"}]"#,
+        )
+        .expect("rewritten installed metadata");
+        assert_eq!(
+            cache
+                .versions_at(&uri, "{}", now + Duration::from_secs(3))
+                .get("psr/log"),
+            Some(&"3.0.22".to_owned())
+        );
+    }
+
+    #[test]
+    fn drops_stale_versions_when_installed_metadata_stays_missing() {
+        let directory = tempdir().expect("temporary directory");
+        let composer_path = directory.path().join("composer.json");
+        let installed_directory = directory.path().join("vendor/composer");
+        fs::create_dir_all(&installed_directory).expect("installed directory");
+        let installed_path = installed_directory.join("installed.json");
+        fs::write(&installed_path, r#"[{"name":"psr/log","version":"3.0.1"}]"#)
+            .expect("installed metadata");
+        let uri = Url::from_file_path(composer_path)
+            .expect("file URL")
+            .to_string();
+        let mut cache = InstalledVersionCache::default();
+        let now = Instant::now();
+
+        assert!(!cache.versions_at(&uri, "{}", now).is_empty());
+        fs::remove_file(&installed_path).expect("remove installed metadata");
+        assert!(!cache
+            .versions_at(&uri, "{}", now + Duration::from_secs(1))
+            .is_empty());
+        assert!(cache
+            .versions_at(
+                &uri,
+                "{}",
+                now + INSTALLED_METADATA_GRACE_PERIOD + Duration::from_secs(2),
+            )
+            .is_empty());
         assert!(cache.entries.is_empty());
     }
 

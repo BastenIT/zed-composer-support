@@ -7,7 +7,7 @@ use std::{
 use zed_extension_api::{self as zed, Result};
 
 const LANGUAGE_SERVER_ID: &str = "composer-language-server";
-const SERVER_VERSION: &str = "0.2.3";
+const SERVER_VERSION: &str = "0.2.4";
 const SERVER_NAME: &str = "composer-language-server";
 const CACHE_DIRECTORY_ENV: &str = "COMPOSER_LANGUAGE_SERVER_CACHE_DIR";
 const MIN_SERVER_BYTES: u64 = 64 * 1024;
