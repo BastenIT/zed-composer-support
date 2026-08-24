@@ -18,7 +18,7 @@ Links are added in `require`, `require-dev`, `conflict`, `replace`, `provide`, a
 
 ## Performance by design
 
-The language server is distributed as an optimized native binary with link-time optimization enabled. Its event loop stays lightweight, filesystem and network work runs off the main protocol path, Packagist requests are deduplicated and limited to ten at a time, and the update cache is bounded. Locally installed versions are always returned first; update checks never delay or hide them.
+The language server is distributed as an optimized native binary with link-time optimization enabled. Its event loop stays lightweight, filesystem and network work runs off the main protocol path, Packagist requests are deduplicated and limited to four at a time, and the update cache is bounded. Parsed documents and unchanged installed-package metadata are reused locally. Locally installed versions are always returned first; update checks never delay or hide them.
 
 ## Installation
 
@@ -47,7 +47,7 @@ If `vendor/composer/installed.json` is absent, invalid, or does not contain a pa
 
 ## Update checks
 
-Update checks are enabled by default. They query Packagist's Composer 2 metadata endpoint for packages in `require` and `require-dev`. Results are cached for one hour, requests are limited to ten at a time, and each request times out after five seconds.
+Update checks are enabled by default. They query Packagist's Composer 2 metadata endpoint for packages in `require` and `require-dev`. Successful results are cached in memory for six hours, failed lookups for fifteen minutes, requests are limited to four at a time and 256 per hour, and each request times out after five seconds.
 
 Installed versions are shown immediately. Packagist requests happen in the background; a slow connection, rate limit, invalid response, or offline session never hides the locally installed version.
 

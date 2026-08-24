@@ -1,7 +1,10 @@
 use std::{
     collections::HashMap,
-    fs,
+    fs::{self, File, Metadata},
+    io::Read,
     path::{Path, PathBuf},
+    sync::Arc,
+    time::SystemTime,
 };
 
 use jsonc_parser::{tokens::Token as JsonToken, Scanner, ScannerOptions};
@@ -9,7 +12,8 @@ use serde_json::Value;
 use tower_lsp_server::ls_types::{Position, Range};
 use url::Url;
 
-const MAX_INSTALLED_METADATA_BYTES: u64 = 64 * 1024 * 1024;
+const MAX_INSTALLED_METADATA_BYTES: u64 = 16 * 1024 * 1024;
+const MAX_INSTALLED_CACHE_ENTRIES: usize = 64;
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 enum TokenKind {
@@ -57,6 +61,82 @@ pub(crate) struct DependencyEntry {
     pub(crate) name: String,
     key_token: Token,
     pub(crate) value_end: usize,
+    package_range: Range,
+    value_position: Position,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct MetadataFingerprint {
+    len: u64,
+    modified: Option<SystemTime>,
+}
+
+#[derive(Debug)]
+struct InstalledCacheEntry {
+    fingerprint: MetadataFingerprint,
+    versions: Arc<HashMap<String, String>>,
+    last_used: u64,
+}
+
+#[derive(Debug, Default)]
+pub(crate) struct InstalledVersionCache {
+    entries: HashMap<PathBuf, InstalledCacheEntry>,
+    clock: u64,
+}
+
+impl InstalledVersionCache {
+    pub(crate) fn versions(
+        &mut self,
+        uri: &str,
+        document_text: &str,
+    ) -> Arc<HashMap<String, String>> {
+        let Some(installed_path) = installed_metadata_path(uri, document_text) else {
+            return Arc::default();
+        };
+        let Ok(metadata) = fs::metadata(&installed_path) else {
+            self.entries.remove(&installed_path);
+            return Arc::default();
+        };
+        let Some(fingerprint) = metadata_fingerprint(&metadata) else {
+            self.entries.remove(&installed_path);
+            return Arc::default();
+        };
+
+        self.clock = self.clock.wrapping_add(1);
+        if let Some(entry) = self.entries.get_mut(&installed_path) {
+            if entry.fingerprint == fingerprint {
+                entry.last_used = self.clock;
+                return Arc::clone(&entry.versions);
+            }
+        }
+
+        let Some(versions) = read_installed_versions(&installed_path) else {
+            self.entries.remove(&installed_path);
+            return Arc::default();
+        };
+        let versions = Arc::new(versions);
+        if self.entries.len() >= MAX_INSTALLED_CACHE_ENTRIES
+            && !self.entries.contains_key(&installed_path)
+        {
+            if let Some(oldest) = self
+                .entries
+                .iter()
+                .min_by_key(|(_, entry)| entry.last_used)
+                .map(|(path, _)| path.clone())
+            {
+                self.entries.remove(&oldest);
+            }
+        }
+        self.entries.insert(
+            installed_path,
+            InstalledCacheEntry {
+                fingerprint,
+                versions: Arc::clone(&versions),
+                last_used: self.clock,
+            },
+        );
+        versions
+    }
 }
 
 pub(crate) fn dependency_entries(text: &str) -> Vec<DependencyEntry> {
@@ -84,11 +164,49 @@ pub(crate) fn dependency_entries(text: &str) -> Vec<DependencyEntry> {
                     name: dependency.key,
                     key_token: dependency.key_token,
                     value_end: dependency.value.end,
+                    package_range: Range::default(),
+                    value_position: Position::default(),
                 });
             }
         }
     }
+    let positions = PositionIndex::new(text);
+    for entry in &mut entries {
+        entry.package_range = Range {
+            start: positions.position(entry.key_token.start + 1),
+            end: positions.position(entry.key_token.end.saturating_sub(1)),
+        };
+        entry.value_position = positions.position(entry.value_end);
+    }
     entries
+}
+
+struct PositionIndex<'a> {
+    text: &'a str,
+    line_starts: Vec<usize>,
+}
+
+impl<'a> PositionIndex<'a> {
+    fn new(text: &'a str) -> Self {
+        let mut line_starts = vec![0];
+        line_starts.extend(
+            text.bytes()
+                .enumerate()
+                .filter_map(|(index, byte)| (byte == b'\n').then_some(index + 1)),
+        );
+        Self { text, line_starts }
+    }
+
+    fn position(&self, offset: usize) -> Position {
+        let offset = offset.min(self.text.len());
+        let line = self.line_starts.partition_point(|start| *start <= offset) - 1;
+        let line_start = self.line_starts[line];
+        let character = self.text[line_start..offset]
+            .chars()
+            .map(|character| character.len_utf16() as u32)
+            .sum();
+        Position::new(line as u32, character)
+    }
 }
 
 fn tokenize(text: &str) -> Vec<Token> {
@@ -257,13 +375,15 @@ fn is_package_character(character: char) -> bool {
     character.is_ascii_alphanumeric() || matches!(character, '_' | '.' | '-')
 }
 
-pub(crate) fn package_range(text: &str, dependency: &DependencyEntry) -> Range {
-    Range {
-        start: offset_to_position(text, dependency.key_token.start + 1),
-        end: offset_to_position(text, dependency.key_token.end.saturating_sub(1)),
-    }
+pub(crate) fn package_range(dependency: &DependencyEntry) -> Range {
+    dependency.package_range
 }
 
+pub(crate) fn dependency_position(dependency: &DependencyEntry) -> Position {
+    dependency.value_position
+}
+
+#[cfg(test)]
 pub(crate) fn offset_to_position(text: &str, offset: usize) -> Position {
     let mut line = 0;
     let mut character = 0;
@@ -279,7 +399,7 @@ pub(crate) fn offset_to_position(text: &str, offset: usize) -> Position {
 }
 
 pub(crate) fn position_in_range(position: Position, range: Range) -> bool {
-    position >= range.start && position <= range.end
+    position >= range.start && position < range.end
 }
 
 pub(crate) fn composer_path_from_uri(uri: &str) -> Option<PathBuf> {
@@ -290,28 +410,53 @@ pub(crate) fn composer_path_from_uri(uri: &str) -> Option<PathBuf> {
         .then_some(path)
 }
 
+#[cfg(test)]
 pub(crate) fn installed_versions(uri: &str, document_text: &str) -> HashMap<String, String> {
-    let Some(composer_path) = composer_path_from_uri(uri) else {
+    let Some(installed_path) = installed_metadata_path(uri, document_text) else {
         return HashMap::new();
     };
+    read_installed_versions(&installed_path).unwrap_or_default()
+}
+
+fn installed_metadata_path(uri: &str, document_text: &str) -> Option<PathBuf> {
+    let composer_path = composer_path_from_uri(uri)?;
     let project_directory = composer_path.parent().unwrap_or_else(|| Path::new("."));
     let vendor_directory =
         configured_vendor_directory(document_text).unwrap_or_else(|| "vendor".to_owned());
-    let installed_path = project_directory
-        .join(vendor_directory)
-        .join("composer")
-        .join("installed.json");
+    Some(
+        project_directory
+            .join(vendor_directory)
+            .join("composer")
+            .join("installed.json"),
+    )
+}
 
-    let Ok(metadata) = fs::metadata(&installed_path) else {
-        return HashMap::new();
-    };
-    if metadata.len() > MAX_INSTALLED_METADATA_BYTES {
-        return HashMap::new();
+fn metadata_fingerprint(metadata: &Metadata) -> Option<MetadataFingerprint> {
+    (metadata.is_file() && metadata.len() <= MAX_INSTALLED_METADATA_BYTES).then(|| {
+        MetadataFingerprint {
+            len: metadata.len(),
+            modified: metadata.modified().ok(),
+        }
+    })
+}
+
+fn read_installed_versions(path: &Path) -> Option<HashMap<String, String>> {
+    let file = File::open(path).ok()?;
+    let metadata = file.metadata().ok()?;
+    metadata_fingerprint(&metadata)?;
+
+    // Read from the same handle that was inspected and enforce the limit while
+    // reading. This prevents a symlink/device or a file replacement race from
+    // turning the metadata read into an unbounded allocation.
+    let mut contents = Vec::with_capacity(metadata.len() as usize);
+    file.take(MAX_INSTALLED_METADATA_BYTES + 1)
+        .read_to_end(&mut contents)
+        .ok()?;
+    if contents.len() as u64 > MAX_INSTALLED_METADATA_BYTES {
+        return None;
     }
-    let Ok(contents) = fs::read_to_string(installed_path) else {
-        return HashMap::new();
-    };
-    installed_versions_from_json(&contents)
+    let contents = String::from_utf8(contents).ok()?;
+    Some(installed_versions_from_json(&contents))
 }
 
 fn configured_vendor_directory(text: &str) -> Option<String> {
@@ -465,7 +610,7 @@ mod tests {
             ]
         );
         assert_eq!(
-            package_range(COMPOSER_JSON, &entries[0]),
+            package_range(&entries[0]),
             Range::new(Position::new(5, 5), Position::new(5, 22))
         );
     }
@@ -482,6 +627,13 @@ mod tests {
     fn uses_utf16_lsp_positions() {
         assert_eq!(offset_to_position("😀x", 4), Position::new(0, 2));
         assert_eq!(offset_to_position("😀\nx", 6), Position::new(1, 1));
+    }
+
+    #[test]
+    fn treats_lsp_range_ends_as_exclusive() {
+        let range = Range::new(Position::new(2, 3), Position::new(2, 5));
+        assert!(position_in_range(Position::new(2, 3), range));
+        assert!(!position_in_range(Position::new(2, 5), range));
     }
 
     #[test]
@@ -529,6 +681,49 @@ mod tests {
         fs::write(installed_directory.join("installed.json"), "not json")
             .expect("installed metadata");
         assert!(installed_versions(&uri, "{}").is_empty());
+    }
+
+    #[test]
+    fn installed_metadata_reads_are_bounded_and_cached() {
+        let directory = tempdir().expect("temporary directory");
+        let composer_path = directory.path().join("composer.json");
+        let installed_directory = directory.path().join("vendor/composer");
+        fs::create_dir_all(&installed_directory).expect("installed directory");
+        let installed_path = installed_directory.join("installed.json");
+        fs::write(&installed_path, r#"[{"name":"psr/log","version":"3.0.1"}]"#)
+            .expect("installed metadata");
+        let uri = Url::from_file_path(composer_path)
+            .expect("file URL")
+            .to_string();
+        let mut cache = InstalledVersionCache::default();
+        assert_eq!(
+            cache.versions(&uri, "{}").get("psr/log"),
+            Some(&"3.0.1".to_owned())
+        );
+        assert_eq!(cache.entries.len(), 1);
+
+        fs::write(
+            &installed_path,
+            r#"[{"name":"psr/log","version":"3.0.22"}]"#,
+        )
+        .expect("updated installed metadata");
+        assert_eq!(
+            cache.versions(&uri, "{}").get("psr/log"),
+            Some(&"3.0.22".to_owned())
+        );
+
+        let oversized = fs::File::create(&installed_path).expect("oversized metadata");
+        oversized
+            .set_len(MAX_INSTALLED_METADATA_BYTES + 1)
+            .expect("set oversized length");
+        drop(oversized);
+        assert!(cache.versions(&uri, "{}").is_empty());
+        assert!(cache.entries.is_empty());
+
+        fs::remove_file(&installed_path).expect("remove oversized metadata");
+        fs::create_dir(&installed_path).expect("non-file metadata path");
+        assert!(cache.versions(&uri, "{}").is_empty());
+        assert!(cache.entries.is_empty());
     }
 
     #[test]

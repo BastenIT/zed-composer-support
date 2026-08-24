@@ -3,7 +3,7 @@ use std::{
     collections::HashMap,
     sync::{
         atomic::{AtomicBool, Ordering as AtomicOrdering},
-        Arc,
+        Arc, Mutex as StdMutex,
     },
     time::{Duration, Instant},
 };
@@ -24,22 +24,39 @@ use ureq::Agent;
 
 use crate::{
     composer::{
-        compare_versions, composer_path_from_uri, dependency_entries, installed_versions,
-        is_update_section, newest_stable_version, offset_to_position, package_range,
-        position_in_range, version_label,
+        compare_versions, composer_path_from_uri, dependency_entries, dependency_position,
+        is_update_section, newest_stable_version, package_range, position_in_range, version_label,
+        DependencyEntry, InstalledVersionCache,
     },
     SERVER_VERSION,
 };
 
-const PACKAGIST_CACHE_TTL: Duration = Duration::from_secs(60 * 60);
-const PACKAGIST_ERROR_CACHE_TTL: Duration = Duration::from_secs(5 * 60);
+const PACKAGIST_CACHE_TTL: Duration = Duration::from_secs(6 * 60 * 60);
+const PACKAGIST_ERROR_CACHE_TTL: Duration = Duration::from_secs(15 * 60);
 const PACKAGIST_TIMEOUT: Duration = Duration::from_secs(5);
-const MAX_CONCURRENT_REQUESTS: usize = 10;
-const MAX_CACHE_ENTRIES: usize = 512;
+const MAX_CONCURRENT_REQUESTS: usize = 4;
+const MAX_CACHE_ENTRIES: usize = 256;
+const MAX_DOCUMENT_BYTES: usize = 2 * 1024 * 1024;
+const PACKAGIST_REQUEST_WINDOW: Duration = Duration::from_secs(60 * 60);
+const MAX_PACKAGIST_REQUESTS_PER_WINDOW: usize = 256;
 
-#[derive(Clone, Debug)]
+#[derive(Debug)]
 struct Document {
     text: String,
+    dependencies: Vec<DependencyEntry>,
+}
+
+impl Document {
+    fn new(text: String) -> Self {
+        if text.len() > MAX_DOCUMENT_BYTES {
+            return Self {
+                text: String::new(),
+                dependencies: Vec::new(),
+            };
+        }
+        let dependencies = dependency_entries(&text);
+        Self { text, dependencies }
+    }
 }
 
 #[derive(Debug)]
@@ -48,7 +65,6 @@ enum CacheEntry {
     Ready {
         value: Option<String>,
         expires_at: Instant,
-        inserted_at: Instant,
     },
 }
 
@@ -59,9 +75,21 @@ enum CacheLookup {
     Missing,
 }
 
-#[derive(Debug, Default)]
+#[derive(Debug)]
 struct VersionCache {
     entries: HashMap<String, CacheEntry>,
+    request_window_started: Instant,
+    requests_in_window: usize,
+}
+
+impl Default for VersionCache {
+    fn default() -> Self {
+        Self {
+            entries: HashMap::new(),
+            request_window_started: Instant::now(),
+            requests_in_window: 0,
+        }
+    }
 }
 
 impl VersionCache {
@@ -90,7 +118,15 @@ impl VersionCache {
         if self.entries.len() >= MAX_CACHE_ENTRIES {
             return false;
         }
+        if now.saturating_duration_since(self.request_window_started) >= PACKAGIST_REQUEST_WINDOW {
+            self.request_window_started = now;
+            self.requests_in_window = 0;
+        }
+        if self.requests_in_window >= MAX_PACKAGIST_REQUESTS_PER_WINDOW {
+            return false;
+        }
         self.entries.insert(key, CacheEntry::Pending);
+        self.requests_in_window += 1;
         true
     }
 
@@ -105,7 +141,6 @@ impl VersionCache {
             CacheEntry::Ready {
                 value,
                 expires_at: now + ttl,
-                inserted_at: now,
             },
         );
     }
@@ -114,22 +149,6 @@ impl VersionCache {
         self.entries.retain(
             |_, entry| !matches!(entry, CacheEntry::Ready { expires_at, .. } if *expires_at <= now),
         );
-        if self.entries.len() < MAX_CACHE_ENTRIES {
-            return;
-        }
-
-        let oldest = self
-            .entries
-            .iter()
-            .filter_map(|(key, entry)| match entry {
-                CacheEntry::Ready { inserted_at, .. } => Some((key.clone(), *inserted_at)),
-                CacheEntry::Pending => None,
-            })
-            .min_by_key(|(_, inserted_at)| *inserted_at)
-            .map(|(key, _)| key);
-        if let Some(oldest) = oldest {
-            self.entries.remove(&oldest);
-        }
     }
 }
 
@@ -146,6 +165,7 @@ impl UpdateState {
     fn new() -> Self {
         let config = Agent::config_builder()
             .timeout_global(Some(PACKAGIST_TIMEOUT))
+            .https_only(true)
             .user_agent(format!(
                 "zed-composer-support/{SERVER_VERSION} (+https://github.com/BastenIT/zed-composer-support)"
             ))
@@ -228,9 +248,10 @@ fn request_latest_stable_version(agent: &Agent, package_name: &str) -> Option<St
 #[derive(Debug)]
 pub(crate) struct Backend {
     client: Client,
-    documents: RwLock<HashMap<String, Document>>,
+    documents: RwLock<HashMap<String, Arc<Document>>>,
     check_updates: AtomicBool,
     updates: Arc<UpdateState>,
+    installed_cache: Arc<StdMutex<InstalledVersionCache>>,
 }
 
 impl Backend {
@@ -240,6 +261,7 @@ impl Backend {
             documents: RwLock::new(HashMap::new()),
             check_updates: AtomicBool::new(true),
             updates: Arc::new(UpdateState::new()),
+            installed_cache: Arc::new(StdMutex::new(InstalledVersionCache::default())),
         }
     }
 }
@@ -294,9 +316,7 @@ impl LanguageServer for Backend {
     async fn did_open(&self, params: DidOpenTextDocumentParams) {
         self.documents.write().await.insert(
             params.text_document.uri.to_string(),
-            Document {
-                text: params.text_document.text,
-            },
+            Arc::new(Document::new(params.text_document.text)),
         );
     }
 
@@ -306,7 +326,7 @@ impl LanguageServer for Backend {
         };
         self.documents.write().await.insert(
             params.text_document.uri.to_string(),
-            Document { text: change.text },
+            Arc::new(Document::new(change.text)),
         );
     }
 
@@ -326,14 +346,15 @@ impl LanguageServer for Backend {
             return Ok(Some(Vec::new()));
         };
 
-        let links = dependency_entries(&document.text)
-            .into_iter()
+        let links = document
+            .dependencies
+            .iter()
             .filter_map(|dependency| {
                 let target = format!("https://packagist.org/packages/{}", dependency.name)
                     .parse()
                     .ok()?;
                 Some(DocumentLink {
-                    range: package_range(&document.text, &dependency),
+                    range: package_range(dependency),
                     target: Some(target),
                     tooltip: Some(format!("Open {} on Packagist", dependency.name)),
                     data: None,
@@ -353,18 +374,22 @@ impl LanguageServer for Backend {
         };
         let installed_uri = uri.clone();
         let installed_text = document.text.clone();
+        let installed_cache = Arc::clone(&self.installed_cache);
         let installed = tokio::task::spawn_blocking(move || {
-            installed_versions(&installed_uri, &installed_text)
+            installed_cache
+                .lock()
+                .map(|mut cache| cache.versions(&installed_uri, &installed_text))
+                .unwrap_or_default()
         })
         .await
         .unwrap_or_default();
         let mut hints = Vec::new();
 
-        for dependency in dependency_entries(&document.text) {
+        for dependency in &document.dependencies {
             let Some(version) = installed.get(&dependency.name.to_ascii_lowercase()) else {
                 continue;
             };
-            let position = offset_to_position(&document.text, dependency.value_end);
+            let position = dependency_position(dependency);
             if !position_in_range(position, params.range) {
                 continue;
             }
@@ -441,5 +466,36 @@ mod tests {
             cache.get("VENDOR/PACKAGE", now),
             CacheLookup::Ready(Some(version)) if version == "v1.2.3"
         ));
+
+        cache.finish_request("broken/package", None, now);
+        assert!(matches!(
+            cache.get("broken/package", now + PACKAGIST_ERROR_CACHE_TTL),
+            CacheLookup::Missing
+        ));
+    }
+
+    #[test]
+    fn cache_capacity_and_request_budget_prevent_network_churn() {
+        let mut cache = VersionCache::default();
+        let now = Instant::now();
+        for index in 0..MAX_CACHE_ENTRIES {
+            let package = format!("vendor/package-{index}");
+            assert!(cache.begin_request(&package, now));
+            cache.finish_request(&package, None, now);
+        }
+
+        let after_failure_expiry = now + PACKAGIST_ERROR_CACHE_TTL;
+        assert!(!cache.begin_request("vendor/extra", after_failure_expiry));
+        assert!(cache.entries.is_empty());
+
+        let after_budget_reset = now + PACKAGIST_REQUEST_WINDOW;
+        assert!(cache.begin_request("vendor/extra", after_budget_reset));
+    }
+
+    #[test]
+    fn oversized_documents_are_not_parsed_or_retained() {
+        let document = Document::new("x".repeat(MAX_DOCUMENT_BYTES + 1));
+        assert!(document.text.is_empty());
+        assert!(document.dependencies.is_empty());
     }
 }

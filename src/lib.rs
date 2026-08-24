@@ -7,7 +7,7 @@ use std::{
 use zed_extension_api::{self as zed, Result};
 
 const LANGUAGE_SERVER_ID: &str = "composer-language-server";
-const SERVER_VERSION: &str = "0.2.1";
+const SERVER_VERSION: &str = "0.2.2";
 const SERVER_NAME: &str = "composer-language-server";
 const MIN_SERVER_BYTES: u64 = 64 * 1024;
 
@@ -147,18 +147,30 @@ impl ComposerExtension {
             .ok()?
             .filter_map(|entry| entry.ok().map(|entry| entry.path()))
             .filter(|path| path != current_path)
-            .filter(|path| {
-                path.file_name()
-                    .and_then(|name| name.to_str())
-                    .is_some_and(|name| {
-                        name.starts_with(SERVER_NAME)
-                            && suffixes.iter().any(|suffix| name.ends_with(suffix))
-                    })
+            .filter_map(|path| {
+                let name = path.file_name()?.to_str()?;
+                let (target_priority, suffix) = suffixes
+                    .iter()
+                    .enumerate()
+                    .find(|(_, suffix)| name.ends_with(suffix.as_str()))?;
+                let version = name
+                    .strip_prefix(&format!("{SERVER_NAME}-"))?
+                    .strip_suffix(suffix)?
+                    .split('.')
+                    .map(str::parse::<u64>)
+                    .collect::<std::result::Result<Vec<_>, _>>()
+                    .ok()?;
+                (!version.is_empty()).then_some((path, version, target_priority))
             })
-            .filter(|path| Self::is_valid_server(path, platform.format))
+            .filter(|(path, _, _)| Self::is_valid_server(path, platform.format))
             .collect();
-        candidates.sort_unstable_by(|left, right| right.file_name().cmp(&left.file_name()));
-        candidates.into_iter().next()
+        candidates.sort_unstable_by(|left, right| {
+            right.1.cmp(&left.1).then_with(|| left.2.cmp(&right.2))
+        });
+        candidates
+            .into_iter()
+            .map(|(path, _, _)| path)
+            .find(|path| zed::make_file_executable(path.to_string_lossy().as_ref()).is_ok())
     }
 
     fn server_path(language_server_id: &zed::LanguageServerId) -> Result<PathBuf> {
@@ -178,7 +190,18 @@ impl ComposerExtension {
             platform.target, platform.executable_suffix
         ));
         if Self::is_valid_server(&path, platform.format) {
-            return Ok(path);
+            if zed::make_file_executable(path.to_string_lossy().as_ref()).is_ok() {
+                return Ok(path);
+            }
+            if let Err(error) = fs::remove_file(&path) {
+                if let Some(fallback) = Self::fallback_server(&work_dir, &path, &platform) {
+                    return Ok(fallback);
+                }
+                return Err(format!(
+                    "failed to repair or replace the cached Composer language server at {}: {error}",
+                    path.display()
+                ));
+            }
         }
 
         if path.exists() {
@@ -205,6 +228,7 @@ impl ComposerExtension {
         .and_then(|_| zed::make_file_executable(path.to_string_lossy().as_ref()));
 
         if let Err(error) = result {
+            let _ = fs::remove_file(&path);
             if let Some(fallback) = Self::fallback_server(&work_dir, &path, &platform) {
                 zed::set_language_server_installation_status(
                     language_server_id,

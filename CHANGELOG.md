@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.2.2
+
+- Bound document and installed-metadata processing, reject non-file metadata sources, and enforce the metadata byte limit while reading.
+- Cache parsed documents and unchanged installed-package metadata to reduce repeated CPU and filesystem work.
+- Reduce Packagist concurrency, extend cache lifetimes, add an hourly request budget, and require HTTPS across redirects.
+- Retry cached-server permission setup and select offline fallbacks by numeric version.
+
 ## 0.2.1
 
 - Ship self-contained musl binaries on Linux so the language server does not depend on a distribution's glibc version.
