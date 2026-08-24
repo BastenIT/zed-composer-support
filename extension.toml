@@ -1,7 +1,7 @@
 id = "composer-support"
 name = "Composer Support"
 description = "Packagist links, installed versions, and update hints for composer.json files."
-version = "0.2.2"
+version = "0.2.3"
 schema_version = 1
 authors = ["BastenIT"]
 repository = "https://github.com/BastenIT/zed-composer-support"

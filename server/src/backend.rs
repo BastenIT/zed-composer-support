@@ -1,15 +1,15 @@
 use std::{
     cmp::Ordering,
-    collections::HashMap,
+    collections::{HashMap, HashSet},
     sync::{
         atomic::{AtomicBool, Ordering as AtomicOrdering},
         Arc, Mutex as StdMutex,
     },
-    time::{Duration, Instant},
+    time::Duration,
 };
 
 use serde_json::Value;
-use tokio::sync::{Mutex, RwLock, Semaphore};
+use tokio::sync::{RwLock, Semaphore};
 use tower_lsp_server::{
     jsonrpc::Result,
     ls_types::{
@@ -28,17 +28,15 @@ use crate::{
         is_update_section, newest_stable_version, package_range, position_in_range, version_label,
         DependencyEntry, InstalledVersionCache,
     },
+    version_cache::{CacheLookup, RequestClaim, VersionCache},
     SERVER_VERSION,
 };
 
-const PACKAGIST_CACHE_TTL: Duration = Duration::from_secs(6 * 60 * 60);
-const PACKAGIST_ERROR_CACHE_TTL: Duration = Duration::from_secs(15 * 60);
 const PACKAGIST_TIMEOUT: Duration = Duration::from_secs(5);
+const PENDING_RECHECK_INTERVAL: Duration = Duration::from_secs(1);
+const MAX_PENDING_RECHECKS: usize = 35;
 const MAX_CONCURRENT_REQUESTS: usize = 4;
-const MAX_CACHE_ENTRIES: usize = 256;
 const MAX_DOCUMENT_BYTES: usize = 2 * 1024 * 1024;
-const PACKAGIST_REQUEST_WINDOW: Duration = Duration::from_secs(60 * 60);
-const MAX_PACKAGIST_REQUESTS_PER_WINDOW: usize = 256;
 
 #[derive(Debug)]
 struct Document {
@@ -60,103 +58,11 @@ impl Document {
 }
 
 #[derive(Debug)]
-enum CacheEntry {
-    Pending,
-    Ready {
-        value: Option<String>,
-        expires_at: Instant,
-    },
-}
-
-#[derive(Debug)]
-enum CacheLookup {
-    Ready(Option<String>),
-    Pending,
-    Missing,
-}
-
-#[derive(Debug)]
-struct VersionCache {
-    entries: HashMap<String, CacheEntry>,
-    request_window_started: Instant,
-    requests_in_window: usize,
-}
-
-impl Default for VersionCache {
-    fn default() -> Self {
-        Self {
-            entries: HashMap::new(),
-            request_window_started: Instant::now(),
-            requests_in_window: 0,
-        }
-    }
-}
-
-impl VersionCache {
-    fn get(&mut self, package_name: &str, now: Instant) -> CacheLookup {
-        let key = package_name.to_ascii_lowercase();
-        match self.entries.get(&key) {
-            Some(CacheEntry::Pending) => CacheLookup::Pending,
-            Some(CacheEntry::Ready {
-                value, expires_at, ..
-            }) if *expires_at > now => CacheLookup::Ready(value.clone()),
-            Some(CacheEntry::Ready { .. }) => {
-                self.entries.remove(&key);
-                CacheLookup::Missing
-            }
-            None => CacheLookup::Missing,
-        }
-    }
-
-    fn begin_request(&mut self, package_name: &str, now: Instant) -> bool {
-        let key = package_name.to_ascii_lowercase();
-        if !matches!(self.get(&key, now), CacheLookup::Missing) {
-            return false;
-        }
-
-        self.prune(now);
-        if self.entries.len() >= MAX_CACHE_ENTRIES {
-            return false;
-        }
-        if now.saturating_duration_since(self.request_window_started) >= PACKAGIST_REQUEST_WINDOW {
-            self.request_window_started = now;
-            self.requests_in_window = 0;
-        }
-        if self.requests_in_window >= MAX_PACKAGIST_REQUESTS_PER_WINDOW {
-            return false;
-        }
-        self.entries.insert(key, CacheEntry::Pending);
-        self.requests_in_window += 1;
-        true
-    }
-
-    fn finish_request(&mut self, package_name: &str, value: Option<String>, now: Instant) {
-        let ttl = if value.is_some() {
-            PACKAGIST_CACHE_TTL
-        } else {
-            PACKAGIST_ERROR_CACHE_TTL
-        };
-        self.entries.insert(
-            package_name.to_ascii_lowercase(),
-            CacheEntry::Ready {
-                value,
-                expires_at: now + ttl,
-            },
-        );
-    }
-
-    fn prune(&mut self, now: Instant) {
-        self.entries.retain(
-            |_, entry| !matches!(entry, CacheEntry::Ready { expires_at, .. } if *expires_at <= now),
-        );
-    }
-}
-
-#[derive(Debug)]
 struct UpdateState {
-    cache: Mutex<VersionCache>,
+    cache: Arc<StdMutex<VersionCache>>,
     request_limit: Arc<Semaphore>,
     agent: Agent,
+    pending_rechecks: StdMutex<HashSet<String>>,
     refresh_supported: AtomicBool,
     refresh_scheduled: AtomicBool,
 }
@@ -167,33 +73,104 @@ impl UpdateState {
             .timeout_global(Some(PACKAGIST_TIMEOUT))
             .https_only(true)
             .user_agent(format!(
-                "zed-composer-support/{SERVER_VERSION} (+https://github.com/BastenIT/zed-composer-support)"
+                "composer-language-server/{SERVER_VERSION} (+https://github.com/BastenIT/zed-composer-support)"
             ))
             .accept("application/json")
             .build();
         Self {
-            cache: Mutex::new(VersionCache::default()),
+            cache: Arc::new(StdMutex::new(VersionCache::from_environment())),
             request_limit: Arc::new(Semaphore::new(MAX_CONCURRENT_REQUESTS)),
             agent: config.into(),
+            pending_rechecks: StdMutex::new(HashSet::new()),
             refresh_supported: AtomicBool::new(false),
             refresh_scheduled: AtomicBool::new(false),
         }
     }
 
-    async fn cached_version(&self, package_name: &str) -> CacheLookup {
-        self.cache.lock().await.get(package_name, Instant::now())
+    fn cached_version(&self, package_name: &str) -> CacheLookup {
+        self.cache
+            .lock()
+            .map(|mut cache| cache.get(package_name))
+            .unwrap_or(CacheLookup::Missing)
     }
 
-    async fn queue(self: &Arc<Self>, package_name: String, client: Client) {
-        if !self
-            .cache
-            .lock()
-            .await
-            .begin_request(&package_name, Instant::now())
-        {
+    async fn queue(self: &Arc<Self>, package_names: Vec<String>, client: Client) {
+        if package_names.is_empty() {
             return;
         }
 
+        let claims = self.claim_requests(package_names).await;
+
+        let mut refresh_from_cache = false;
+        for (package_name, claim) in claims {
+            match claim {
+                RequestClaim::Ready(value) => refresh_from_cache |= value.is_some(),
+                RequestClaim::Started => {
+                    self.spawn_request(package_name, client.clone());
+                }
+                RequestClaim::Pending => {
+                    self.schedule_pending_recheck(package_name, client.clone());
+                }
+                RequestClaim::Rejected => {}
+            }
+        }
+        if refresh_from_cache {
+            self.schedule_refresh(client);
+        }
+    }
+
+    async fn claim_requests(&self, package_names: Vec<String>) -> Vec<(String, RequestClaim)> {
+        let cache = Arc::clone(&self.cache);
+        tokio::task::spawn_blocking(move || {
+            cache
+                .lock()
+                .map(|mut cache| cache.claim_requests(&package_names))
+                .unwrap_or_default()
+        })
+        .await
+        .unwrap_or_default()
+    }
+
+    fn schedule_pending_recheck(self: &Arc<Self>, package_name: String, client: Client) {
+        let scheduled = self
+            .pending_rechecks
+            .lock()
+            .map(|mut pending| pending.insert(package_name.clone()))
+            .unwrap_or(false);
+        if !scheduled {
+            return;
+        }
+
+        let state = Arc::clone(self);
+        tokio::spawn(async move {
+            for _ in 0..MAX_PENDING_RECHECKS {
+                tokio::time::sleep(PENDING_RECHECK_INTERVAL).await;
+                let mut claims = state.claim_requests(vec![package_name.clone()]).await;
+                let Some((_, claim)) = claims.pop() else {
+                    break;
+                };
+                match claim {
+                    RequestClaim::Ready(value) => {
+                        if value.is_some() {
+                            state.schedule_refresh(client.clone());
+                        }
+                        break;
+                    }
+                    RequestClaim::Pending => continue,
+                    RequestClaim::Started => {
+                        state.spawn_request(package_name.clone(), client.clone());
+                        break;
+                    }
+                    RequestClaim::Rejected => break,
+                }
+            }
+            if let Ok(mut pending) = state.pending_rechecks.lock() {
+                pending.remove(&package_name);
+            }
+        });
+    }
+
+    fn spawn_request(self: &Arc<Self>, package_name: String, client: Client) {
         let state = Arc::clone(self);
         tokio::spawn(async move {
             let permit = Arc::clone(&state.request_limit).acquire_owned().await;
@@ -209,12 +186,17 @@ impl UpdateState {
             } else {
                 None
             };
+            drop(permit);
 
-            state
-                .cache
-                .lock()
-                .await
-                .finish_request(&package_name, value.clone(), Instant::now());
+            let cache = Arc::clone(&state.cache);
+            let completed_package = package_name.clone();
+            let completed_value = value.clone();
+            let _ = tokio::task::spawn_blocking(move || {
+                if let Ok(mut cache) = cache.lock() {
+                    cache.finish_request(&completed_package, completed_value);
+                }
+            })
+            .await;
             if value.is_some() {
                 state.schedule_refresh(client);
             }
@@ -384,6 +366,7 @@ impl LanguageServer for Backend {
         .await
         .unwrap_or_default();
         let mut hints = Vec::new();
+        let mut update_requests = Vec::new();
 
         for dependency in &document.dependencies {
             let Some(version) = installed.get(&dependency.name.to_ascii_lowercase()) else {
@@ -398,14 +381,10 @@ impl LanguageServer for Backend {
             if self.check_updates.load(AtomicOrdering::Relaxed)
                 && is_update_section(&dependency.section)
             {
-                match self.updates.cached_version(&dependency.name).await {
+                match self.updates.cached_version(&dependency.name) {
                     CacheLookup::Ready(value) => latest = value,
-                    CacheLookup::Missing => {
-                        self.updates
-                            .queue(dependency.name.clone(), self.client.clone())
-                            .await;
-                    }
-                    CacheLookup::Pending => {}
+                    CacheLookup::Missing => update_requests.push(dependency.name.clone()),
+                    CacheLookup::Pending => update_requests.push(dependency.name.clone()),
                 }
             }
 
@@ -442,6 +421,10 @@ impl LanguageServer for Backend {
             });
         }
 
+        self.updates
+            .queue(update_requests, self.client.clone())
+            .await;
+
         Ok(Some(hints))
     }
 }
@@ -449,48 +432,6 @@ impl LanguageServer for Backend {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[tokio::test]
-    async fn cache_deduplicates_requests_and_expires_failures() {
-        let mut cache = VersionCache::default();
-        let now = Instant::now();
-        assert!(cache.begin_request("Vendor/Package", now));
-        assert!(!cache.begin_request("vendor/package", now));
-        assert!(matches!(
-            cache.get("vendor/package", now),
-            CacheLookup::Pending
-        ));
-
-        cache.finish_request("vendor/package", Some("v1.2.3".to_owned()), now);
-        assert!(matches!(
-            cache.get("VENDOR/PACKAGE", now),
-            CacheLookup::Ready(Some(version)) if version == "v1.2.3"
-        ));
-
-        cache.finish_request("broken/package", None, now);
-        assert!(matches!(
-            cache.get("broken/package", now + PACKAGIST_ERROR_CACHE_TTL),
-            CacheLookup::Missing
-        ));
-    }
-
-    #[test]
-    fn cache_capacity_and_request_budget_prevent_network_churn() {
-        let mut cache = VersionCache::default();
-        let now = Instant::now();
-        for index in 0..MAX_CACHE_ENTRIES {
-            let package = format!("vendor/package-{index}");
-            assert!(cache.begin_request(&package, now));
-            cache.finish_request(&package, None, now);
-        }
-
-        let after_failure_expiry = now + PACKAGIST_ERROR_CACHE_TTL;
-        assert!(!cache.begin_request("vendor/extra", after_failure_expiry));
-        assert!(cache.entries.is_empty());
-
-        let after_budget_reset = now + PACKAGIST_REQUEST_WINDOW;
-        assert!(cache.begin_request("vendor/extra", after_budget_reset));
-    }
 
     #[test]
     fn oversized_documents_are_not_parsed_or_retained() {

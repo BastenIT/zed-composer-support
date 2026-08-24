@@ -46,7 +46,9 @@ fn receive(reader: &mut impl BufRead) -> Value {
 
 #[test]
 fn serves_document_links_over_stdio() {
+    let cache_directory = tempdir().expect("temporary cache directory");
     let mut child = Command::new(env!("CARGO_BIN_EXE_composer-language-server"))
+        .env("COMPOSER_LANGUAGE_SERVER_CACHE_DIR", cache_directory.path())
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())

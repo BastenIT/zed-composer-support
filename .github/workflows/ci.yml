@@ -28,3 +28,36 @@ jobs:
         run: cargo clippy --locked -p composer-language-server --all-targets -- -D warnings
       - name: Check the extension
         run: cargo check --locked -p zed_composer_support --target wasm32-wasip2
+
+  neovim:
+    strategy:
+      fail-fast: false
+      matrix:
+        version: [v0.10.4, stable]
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Install Neovim ${{ matrix.version }}
+        shell: bash
+        run: |
+          curl --fail --location --silent --show-error \
+            "https://github.com/neovim/neovim/releases/download/${{ matrix.version }}/nvim-linux-x86_64.tar.gz" \
+            --output "$RUNNER_TEMP/neovim.tar.gz"
+          mkdir "$RUNNER_TEMP/neovim"
+          tar --extract --gzip --file "$RUNNER_TEMP/neovim.tar.gz" \
+            --directory "$RUNNER_TEMP/neovim" --strip-components=1
+      - name: Check the Neovim adapter
+        env:
+          XDG_CACHE_HOME: ${{ runner.temp }}/nvim-cache
+          XDG_DATA_HOME: ${{ runner.temp }}/nvim-data
+          XDG_STATE_HOME: ${{ runner.temp }}/nvim-state
+        run: $RUNNER_TEMP/neovim/bin/nvim --headless -u NONE -l scripts/check-neovim.lua
+      - name: Build the language server
+        run: cargo build --locked -p composer-language-server
+      - name: Test Neovim with the language server
+        env:
+          XDG_CACHE_HOME: ${{ runner.temp }}/nvim-cache
+          XDG_DATA_HOME: ${{ runner.temp }}/nvim-data
+          XDG_STATE_HOME: ${{ runner.temp }}/nvim-state
+        run: $RUNNER_TEMP/neovim/bin/nvim --headless -u NONE -l scripts/check-neovim-lsp.lua

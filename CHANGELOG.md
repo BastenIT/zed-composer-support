@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.2.3
+
+- Persist Packagist results and the hourly request budget across language-server and editor restarts.
+- Coordinate cache access across worktrees and editor processes with file locking.
+- Recover from malformed, oversized, or unwritable cache files without interrupting language-server features.
+- Add a Neovim 0.10+ integration with native-server installation, inlay hints, and Packagist navigation.
+
 ## 0.2.2
 
 - Bound document and installed-metadata processing, reject non-file metadata sources, and enforce the metadata byte limit while reading.

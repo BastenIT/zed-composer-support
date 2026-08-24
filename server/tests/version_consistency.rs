@@ -27,4 +27,11 @@ fn release_versions_match() {
         launcher.contains(&format!("const SERVER_VERSION: &str = \"{expected}\";")),
         "src/lib.rs must use server version {expected}"
     );
+
+    let neovim = fs::read_to_string(root.join("lua/composer_support/init.lua"))
+        .expect("read Neovim integration");
+    assert!(
+        neovim.contains(&format!("local SERVER_VERSION = \"{expected}\"")),
+        "lua/composer_support/init.lua must use server version {expected}"
+    );
 }

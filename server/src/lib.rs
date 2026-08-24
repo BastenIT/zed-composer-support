@@ -1,5 +1,6 @@
 mod backend;
 mod composer;
+mod version_cache;
 
 use tower_lsp_server::{LspService, Server};
 

@@ -31,6 +31,25 @@ jobs:
         run: cargo clippy --locked -p composer-language-server --all-targets -- -D warnings
       - name: Check the extension
         run: cargo check --locked -p zed_composer_support --target wasm32-wasip2
+      - name: Install stable Neovim
+        shell: bash
+        run: |
+          curl --fail --location --silent --show-error \
+            "https://github.com/neovim/neovim/releases/download/stable/nvim-linux-x86_64.tar.gz" \
+            --output "$RUNNER_TEMP/neovim.tar.gz"
+          mkdir "$RUNNER_TEMP/neovim"
+          tar --extract --gzip --file "$RUNNER_TEMP/neovim.tar.gz" \
+            --directory "$RUNNER_TEMP/neovim" --strip-components=1
+      - name: Build the language server for Neovim
+        run: cargo build --locked -p composer-language-server
+      - name: Test the Neovim integration
+        env:
+          XDG_CACHE_HOME: ${{ runner.temp }}/nvim-cache
+          XDG_DATA_HOME: ${{ runner.temp }}/nvim-data
+          XDG_STATE_HOME: ${{ runner.temp }}/nvim-state
+        run: |
+          "$RUNNER_TEMP/neovim/bin/nvim" --headless -u NONE -l scripts/check-neovim.lua
+          "$RUNNER_TEMP/neovim/bin/nvim" --headless -u NONE -l scripts/check-neovim-lsp.lua
 
   create-release:
     needs: verify

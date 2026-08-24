@@ -7,8 +7,9 @@ use std::{
 use zed_extension_api::{self as zed, Result};
 
 const LANGUAGE_SERVER_ID: &str = "composer-language-server";
-const SERVER_VERSION: &str = "0.2.2";
+const SERVER_VERSION: &str = "0.2.3";
 const SERVER_NAME: &str = "composer-language-server";
+const CACHE_DIRECTORY_ENV: &str = "COMPOSER_LANGUAGE_SERVER_CACHE_DIR";
 const MIN_SERVER_BYTES: u64 = 64 * 1024;
 
 struct ComposerExtension;
@@ -289,13 +290,21 @@ impl zed::Extension for ComposerExtension {
             return Err(format!("unknown language server: {language_server_id:?}"));
         }
 
+        let cache_directory = Self::work_dir()?
+            .join("cache")
+            .to_string_lossy()
+            .into_owned();
         let settings = zed::settings::LspSettings::for_worktree(LANGUAGE_SERVER_ID, worktree)?;
         if let Some(binary) = settings.binary {
             if let Some(command) = binary.path {
+                let mut env: Vec<_> = binary.env.unwrap_or_default().into_iter().collect();
+                if !env.iter().any(|(name, _)| name == CACHE_DIRECTORY_ENV) {
+                    env.push((CACHE_DIRECTORY_ENV.to_owned(), cache_directory));
+                }
                 return Ok(zed::Command {
                     command,
                     args: binary.arguments.unwrap_or_default(),
-                    env: binary.env.unwrap_or_default().into_iter().collect(),
+                    env,
                 });
             }
         }
@@ -305,7 +314,7 @@ impl zed::Extension for ComposerExtension {
                 .to_string_lossy()
                 .into_owned(),
             args: Vec::new(),
-            env: Default::default(),
+            env: vec![(CACHE_DIRECTORY_ENV.to_owned(), cache_directory)],
         })
     }
 }
