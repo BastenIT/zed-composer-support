@@ -7,7 +7,7 @@ use std::{
 use zed_extension_api::{self as zed, Result};
 
 const LANGUAGE_SERVER_ID: &str = "composer-language-server";
-const SERVER_VERSION: &str = "0.2.4";
+const SERVER_VERSION: &str = "0.2.5";
 const SERVER_NAME: &str = "composer-language-server";
 const CACHE_DIRECTORY_ENV: &str = "COMPOSER_LANGUAGE_SERVER_CACHE_DIR";
 const MIN_SERVER_BYTES: u64 = 64 * 1024;
@@ -77,8 +77,7 @@ impl ComposerExtension {
             },
             (_, Architecture::X86) => {
                 return Err(
-                    "Composer Support does not provide a language server for 32-bit systems"
-                        .to_owned(),
+                    "Composer LSP does not provide a language server for 32-bit systems".to_owned(),
                 );
             }
         };
@@ -112,26 +111,6 @@ impl ComposerExtension {
                     )
             }
         }
-    }
-
-    fn development_server(work_dir: &Path, platform: &ServerPlatform) -> Option<PathBuf> {
-        let file_name = format!("{SERVER_NAME}{}", platform.executable_suffix);
-        [
-            work_dir.join("target").join("debug").join(&file_name),
-            work_dir.join("target").join("release").join(&file_name),
-            work_dir
-                .join("target")
-                .join(platform.target)
-                .join("debug")
-                .join(&file_name),
-            work_dir
-                .join("target")
-                .join(platform.target)
-                .join("release")
-                .join(file_name),
-        ]
-        .into_iter()
-        .find(|path| Self::is_valid_server(path, platform.format))
     }
 
     fn fallback_server(
@@ -177,10 +156,6 @@ impl ComposerExtension {
     fn server_path(language_server_id: &zed::LanguageServerId) -> Result<PathBuf> {
         let work_dir = Self::work_dir()?;
         let platform = Self::platform()?;
-
-        if let Some(path) = Self::development_server(&work_dir, &platform) {
-            return Ok(path);
-        }
 
         let asset_name = format!(
             "{SERVER_NAME}-{}{}",

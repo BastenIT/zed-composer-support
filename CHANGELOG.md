@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.2.5
+
+- Rename the Zed extension to Composer LSP and use the LSP-specific `composer-lsp` extension ID.
+- Use Zed's `lsp.composer-language-server.binary.path` setting for local server builds instead of detecting build artifacts automatically.
+
 ## 0.2.4
 
 - Keep installed-version hints stable while Composer rewrites `installed.json` during an update.

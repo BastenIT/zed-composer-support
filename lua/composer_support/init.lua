@@ -1,6 +1,6 @@
 local M = {}
 
-local SERVER_VERSION = "0.2.4"
+local SERVER_VERSION = "0.2.5"
 local MIN_SERVER_BYTES = 64 * 1024
 local CACHE_ENV = "COMPOSER_LANGUAGE_SERVER_CACHE_DIR"
 local REPOSITORY = "BastenIT/zed-composer-support"
@@ -20,7 +20,7 @@ local install_callbacks = {}
 local last_error
 
 local function notify(message, level)
-  vim.notify(message, level or vim.log.levels.INFO, { title = "Composer Support" })
+  vim.notify(message, level or vim.log.levels.INFO, { title = "Composer LSP" })
 end
 
 local function platform_asset(sysname, machine)

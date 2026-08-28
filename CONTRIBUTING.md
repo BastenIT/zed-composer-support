@@ -16,7 +16,7 @@ cargo build -p composer-language-server
 nvim --headless -u NONE -l scripts/check-neovim-lsp.lua
 ```
 
-Then run `cargo build -p composer-language-server`, install the repository as a Zed dev extension, and verify links and inlay hints in a real Composer project. Restart the Composer language server after rebuilding; reinstalling the extension alone may leave the existing server process running.
+Then run `cargo build -p composer-language-server`, install the repository as a Zed dev extension, and set `lsp.composer-language-server.binary.path` to the absolute path of `target/debug/composer-language-server`. Verify links and inlay hints in a real Composer project. Restart the Composer language server after rebuilding; reinstalling the extension alone may leave the existing server process running.
 
 For Neovim, point `server_path` at `target/debug/composer-language-server`, open a real `composer.json`, and verify inlay hints and `gx`. The committed Lua check requires Neovim 0.10 or newer.
 

@@ -1,7 +1,7 @@
 local M = {}
 
 function M.check()
-  vim.health.start("Composer Support")
+  vim.health.start("Composer LSP")
   if vim.fn.has("nvim-0.10") == 1 then
     vim.health.ok("Neovim 0.10 or newer")
   else

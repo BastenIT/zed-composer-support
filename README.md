@@ -1,10 +1,10 @@
 <p align="center">
-  <img src="assets/composer-support-logo.png" width="180" alt="Composer Support logo">
+  <img src="assets/composer-support-logo.png" width="180" alt="Composer LSP logo">
 </p>
 
-<h1 align="center">Composer Support</h1>
+<h1 align="center">Composer LSP</h1>
 
-Composer Support adds package navigation and version information to `composer.json` files in Zed and Neovim. The language server is written in Rust and does not require Composer or a JavaScript runtime in the background.
+Composer LSP adds package navigation and version information to `composer.json` files in Zed and Neovim. The language server is written in Rust and does not require Composer or a JavaScript runtime in the background.
 
 ## Features
 
@@ -19,7 +19,7 @@ Package links work in `require`, `require-dev`, `conflict`, `replace`, `provide`
 
 ## Zed
 
-Install **Composer Support** from Zed's Extensions page.
+Install **Composer LSP** from Zed's Extensions page.
 
 Package links work without additional configuration. Use Command-click on macOS or Control-click on Linux and Windows.
 
@@ -117,27 +117,13 @@ Requirements:
 - The `wasm32-wasip2` Rust target
 - Neovim 0.10+ to check the Neovim adapter
 
-Build the language server before installing the repository as a Zed dev extension:
+Build the language server, install the repository as a Zed dev extension, and point Zed at the local binary:
 
 ```sh
 cargo build -p composer-language-server
 ```
 
-In Zed, open the Extensions page, choose **Install Dev Extension**, and select this repository. Restart the Composer language server after rebuilding it.
-
-Run the project checks with:
-
-```sh
-cargo fmt --all --check
-cargo test -p composer-language-server
-cargo clippy -p composer-language-server --all-targets -- -D warnings
-cargo check -p zed_composer_support --target wasm32-wasip2
-nvim --headless -u NONE -l scripts/check-neovim.lua
-cargo build -p composer-language-server
-nvim --headless -u NONE -l scripts/check-neovim-lsp.lua
-```
-
-If Zed cannot find a local server build, set its path explicitly:
+In Zed, open the Extensions page, choose **Install Dev Extension**, and select this repository. Then add the local binary to your settings:
 
 ```json
 {
@@ -149,6 +135,20 @@ If Zed cannot find a local server build, set its path explicitly:
     }
   }
 }
+```
+
+Restart the Composer language server after rebuilding it.
+
+Run the project checks with:
+
+```sh
+cargo fmt --all --check
+cargo test -p composer-language-server
+cargo clippy -p composer-language-server --all-targets -- -D warnings
+cargo check -p zed_composer_support --target wasm32-wasip2
+nvim --headless -u NONE -l scripts/check-neovim.lua
+cargo build -p composer-language-server
+nvim --headless -u NONE -l scripts/check-neovim-lsp.lua
 ```
 
 See [CONTRIBUTING.md](CONTRIBUTING.md) for the release checklist.

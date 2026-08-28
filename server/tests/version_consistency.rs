@@ -22,10 +22,18 @@ fn release_versions_match() {
     assert_eq!(first_toml_version(&root.join("Cargo.toml")), expected);
     assert_eq!(first_toml_version(&root.join("extension.toml")), expected);
 
+    let manifest =
+        fs::read_to_string(root.join("extension.toml")).expect("read extension manifest");
+    assert!(manifest.lines().any(|line| line == "id = \"composer-lsp\""));
+
     let launcher = fs::read_to_string(root.join("src/lib.rs")).expect("read extension launcher");
     assert!(
         launcher.contains(&format!("const SERVER_VERSION: &str = \"{expected}\";")),
         "src/lib.rs must use server version {expected}"
+    );
+    assert!(
+        !launcher.contains("development_server"),
+        "local Zed builds must be configured through lsp.composer-language-server.binary.path"
     );
 
     let neovim = fs::read_to_string(root.join("lua/composer_support/init.lua"))
