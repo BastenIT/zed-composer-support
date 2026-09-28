@@ -9,6 +9,7 @@ use zed_extension_api::{self as zed, Result};
 const LANGUAGE_SERVER_ID: &str = "composer-language-server";
 const SERVER_VERSION: &str = "0.2.5";
 const SERVER_NAME: &str = "composer-language-server";
+const GITHUB_REPOSITORY: &str = "BastenIT/zed-composer-support";
 const CACHE_DIRECTORY_ENV: &str = "COMPOSER_LANGUAGE_SERVER_CACHE_DIR";
 const MIN_SERVER_BYTES: u64 = 64 * 1024;
 
@@ -189,19 +190,29 @@ impl ComposerExtension {
             })?;
         }
 
-        let download_url = format!(
-            "https://github.com/BastenIT/zed-composer-support/releases/download/v{SERVER_VERSION}/{asset_name}"
-        );
         zed::set_language_server_installation_status(
             language_server_id,
             &zed::LanguageServerInstallationStatus::Downloading,
         );
-        let result = zed::download_file(
-            &download_url,
-            path.to_string_lossy().as_ref(),
-            zed::DownloadedFileType::Uncompressed,
-        )
-        .and_then(|_| zed::make_file_executable(path.to_string_lossy().as_ref()));
+        let result =
+            zed::github_release_by_tag_name(GITHUB_REPOSITORY, &format!("v{SERVER_VERSION}"))
+                .and_then(|release| {
+                    release
+                        .assets
+                        .into_iter()
+                        .find(|asset| asset.name == asset_name)
+                        .ok_or_else(|| {
+                            format!("release v{SERVER_VERSION} has no asset named {asset_name}")
+                        })
+                })
+                .and_then(|asset| {
+                    zed::download_file(
+                        &asset.download_url,
+                        path.to_string_lossy().as_ref(),
+                        zed::DownloadedFileType::Uncompressed,
+                    )
+                })
+                .and_then(|_| zed::make_file_executable(path.to_string_lossy().as_ref()));
 
         if let Err(error) = result {
             let _ = fs::remove_file(&path);
