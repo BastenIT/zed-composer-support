@@ -7,7 +7,7 @@ use std::{
 use zed_extension_api::{self as zed, Result};
 
 const LANGUAGE_SERVER_ID: &str = "composer-language-server";
-const SERVER_VERSION: &str = "0.2.5";
+const SERVER_VERSION: &str = "0.2.6";
 const SERVER_NAME: &str = "composer-language-server";
 const GITHUB_REPOSITORY: &str = "BastenIT/zed-composer-support";
 const CACHE_DIRECTORY_ENV: &str = "COMPOSER_LANGUAGE_SERVER_CACHE_DIR";
