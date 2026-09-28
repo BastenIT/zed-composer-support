@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.2.6
+
+- Resolve the language-server download URL from the GitHub release for the pinned tag instead of constructing it by hand.
+
 ## 0.2.5
 
 - Rename the Zed extension to Composer LSP and use the LSP-specific `composer-lsp` extension ID.
