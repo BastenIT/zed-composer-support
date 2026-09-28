@@ -1,6 +1,6 @@
 local M = {}
 
-local SERVER_VERSION = "0.2.5"
+local SERVER_VERSION = "0.2.6"
 local MIN_SERVER_BYTES = 64 * 1024
 local CACHE_ENV = "COMPOSER_LANGUAGE_SERVER_CACHE_DIR"
 local REPOSITORY = "BastenIT/zed-composer-support"
